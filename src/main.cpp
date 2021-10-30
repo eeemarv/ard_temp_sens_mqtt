@@ -6,8 +6,8 @@
 #include <Watchdog.h>
 
 #define SERIAL_BAUD 115200
-#define DEBUG_DS
-#define DEBUG_SERVER
+// #define SERIAL_EN
+// #define DEBUG_SERVER
 // #define SEARCH_DS_ADDR
 #define DS_READ_TEST
 
@@ -83,6 +83,8 @@
 #define SERV_ERR 0x01
 #define SERV_UNDEFINED 0x00
 
+#define SERV_CHECK_CONN_INTERVAL 60000
+
 #define ACC_COUNT_RESET 0
 #define ACC_RESET 0
 
@@ -98,6 +100,7 @@ DallasTemperature ds(&oneWire);
 
 Watchdog watchdog;
 
+uint32_t servLastCheck = 0;
 uint32_t dsLastRequest = 0;
 uint16_t dsInterval = DS_INIT_TIME;
 uint32_t dsCycleCount = 0;
@@ -174,13 +177,15 @@ void setup() {
   Ethernet.init(10);
   SPI.begin();
   Ethernet.begin(mac, ip);
-  Serial.begin(SERIAL_BAUD);
-  while (!Serial) {
-    ; // wait for serial port to connect. Needed for native USB port only
-  }
-  Serial.print("Dallas temp lib version: ");
-  Serial.println(DALLASTEMPLIBVERSION);
-  Serial.println();
+  #ifdef SERIAL_EN
+    Serial.begin(SERIAL_BAUD);
+    while (!Serial) {
+      ; // wait for serial port to connect. Needed for native USB port only
+    }
+    Serial.print("Dallas temp lib version: ");
+    Serial.println(DALLASTEMPLIBVERSION);
+    Serial.println();
+  #endif
   oneWire.depower();
   ds.begin();
   
@@ -214,43 +219,53 @@ void setup() {
   #else
     for (iii = 0; iii < DS_DEVICE_COUNT; iii++){
       adr = dsProgMemAddr + (iii * DS_ADDRESS_SIZE);
-      Serial.println();
-      Serial.print(iii);
-      Serial.print(": ");
+      #ifdef SERIAL_EN
+        Serial.println();
+        Serial.print(iii);
+        Serial.print(": ");
+      #endif 
       for (jjj = 0; jjj < DS_ADDRESS_SIZE; jjj++){
         (dsAddr)[jjj] = pgm_read_byte_near(adr + jjj);
-        if ((dsAddr)[jjj] < 16){
-          Serial.print(0);
-        }
-        Serial.print((dsAddr)[jjj], HEX);
-        if (jjj < 7){
-          Serial.print(", ");
-        }
+        #ifdef SERIAL_EN
+          if ((dsAddr)[jjj] < 16){
+            Serial.print(0);
+          }
+          Serial.print((dsAddr)[jjj], HEX);
+          if (jjj < 7){
+            Serial.print(", ");
+          }
+        #endif
       }
       ds.setResolution(dsAddr, 12);    
     }
-    Serial.println(); 
+    #ifdef SERIAL_EN
+      Serial.println(); 
+    #endif 
   #endif
 
   ds.setWaitForConversion(false);
   dsLastRequest = millis();
 
   if (Ethernet.hardwareStatus() == EthernetHardwareStatus::EthernetNoHardware) {
-    Serial.println("ENC28J60 not found.");
+    #ifdef SERIAL_EN
+      Serial.println("ENC28J60 not found.");
+    #endif
     while(1){
       delay(1);
     }
   }
 
-  if (Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF) {
-    Serial.println("Ethernet not connected.");
-  } else {
-    Serial.println("Ethernet ok.");
-  }
+  #ifdef SERIAL_EN
+    if (Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF) {
+      Serial.println("Ethernet not connected.");
+    } else {
+      Serial.println("Ethernet ok.");
+    }
+  #endif 
 
   server.begin();
 
-  #ifndef SEARCH_DS_ADDR
+  #if !defined(SEARCH_DS_ADDR) && defined(SERIAL_EN)
     Serial.println();
     Serial.print("Device count: ");
     Serial.print(DS_DEVICE_COUNT);
@@ -264,9 +279,11 @@ void setup() {
       EEPROM.put(EEPROM_ERROR_COUNT + (iii * 4), ui16);
       EEPROM.put(EEPROM_FAIL_COUNT + (iii * 4), ui16);
     }
-    Serial.print("Set sensor error ");
-    Serial.print("and fail counts to ");
-    Serial.println(SET_ERROR_AND_FAIL_COUNTS);
+    #ifdef SERIAL_EN
+      Serial.print("Set sensor error ");
+      Serial.print("and fail counts to ");
+      Serial.println(SET_ERROR_AND_FAIL_COUNTS);
+    #endif
   #endif 
 
   #ifdef SET_BOOT_COUNT
@@ -277,8 +294,11 @@ void setup() {
   #endif
 
   EEPROM.put(EEPROM_BOOT_COUNT, bootCount);
-  Serial.print("Boot count: ");
-  Serial.println(bootCount);
+
+  #ifdef SERIAL_EN
+    Serial.print("Boot count: ");
+    Serial.println(bootCount);
+  #endif
 
   delay(1000);
 
@@ -298,7 +318,7 @@ void loop() {
         dsTemp[dsIndex] = (((int16_t) scratchPad[DS_TEMP_MSB]) << 11)
           | (((int16_t) scratchPad[DS_TEMP_LSB]) << 3);
 
-        #ifdef DEBUG_DS
+        #ifdef SERIAL_EN
           if (!dsIndex){ 
             Serial.print("*");
             Serial.print((float) dsTemp[dsIndex] * DS_RAW_TO_C_MUL);
@@ -323,7 +343,7 @@ void loop() {
           bitClear(dsBuffChange[dsBuffIndex], dsIndex);
         }
 
-        #ifdef DEBUG_DS
+        #ifdef SERIAL_EN
           Serial.print(dsTemp[dsIndex]);
           if (dsCycleCount){
             Serial.print(" (");
@@ -346,7 +366,7 @@ void loop() {
         dsInterval = DS_READ_TIME;
       } else {
 
-        #ifdef DEBUG_DS
+        #ifdef SERIAL_EN
           Serial.print("ERR");
           Serial.print(dsRetryCount);
           Serial.print(" ");
@@ -398,7 +418,7 @@ void loop() {
         if (dsBuffIndex >= DS_BUFF_SIZE){
           dsBuffIndex = 0;
 
-          #ifdef DEBUG_DS
+          #ifdef SERIAL_EN
             Serial.println("BUFF0 ");
           #endif
         }
@@ -409,7 +429,7 @@ void loop() {
 
     } else if (dsStatus & DS_REQUEST) {
 
-      #ifdef DEBUG_DS      
+      #ifdef SERIAL_EN      
         if (!dsRetryCount){
           if (!dsIndex){
             Serial.println();
@@ -431,7 +451,7 @@ void loop() {
 
       ds.requestTemperaturesByAddress(dsAddr);
       
-      #ifdef DEBUG_DS
+      #ifdef SERIAL_EN
         if (dsRetryCount){
           Serial.print("REQ");
           Serial.print(dsRetryCount / 16);
@@ -450,17 +470,29 @@ void loop() {
    * Listen ethernet clients
    */
 
+  if (millis() - servLastCheck > SERV_CHECK_CONN_INTERVAL) {
+    if (Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF) {
+      #ifdef SERIAL_EN
+        Serial.print("Ethernet ");
+        Serial.print("not connected, ");
+        Serial.println("reset shield.");
+      #endif
+      Ethernet.begin(mac, ip);      
+    } else {
+      #ifdef SERIAL_EN
+        Serial.print("{>Eth.ok<}");
+      #endif
+    }
+    servLastCheck = millis();
+  }
+
   EthernetClient client = server.available();
 
   if (!client) {
     return;
   }
 
-  #ifdef DEBUG_DS
-    Serial.print("SERV ");
-  #endif 
-
-  #ifdef DEBUG_SERVER
+  #ifdef SERIAL_EN
     Serial.println("HTTP ");
     Serial.println("client >>");
   #endif
@@ -486,7 +518,7 @@ void loop() {
       clientCharPos++;      
     }
 
-    #ifdef DEBUG_SERVER
+    #ifdef SERIAL_EN
       Serial.print((char) clientChar);
     #endif
 
@@ -682,7 +714,7 @@ void loop() {
         }
       }
 
-      #ifdef DEBUG_SERVER
+      #ifdef SERIAL_EN
         Serial.print("-- avg");
         if (pageSwitch & PAGE_SWITCH_SORT_SENSORS){
           Serial.print(", sorted");
