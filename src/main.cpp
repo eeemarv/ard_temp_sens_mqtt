@@ -12,10 +12,10 @@
 #define DS_READ_TEST
 
 #define EEPROM_BOOT_COUNT 0x00
-// #define SET_BOOT_COUNT 0
+//#define SET_BOOT_COUNT 0
 #define EEPROM_ERROR_COUNT 0x20
 #define EEPROM_FAIL_COUNT 0x40
-// #define SET_ERROR_AND_FAIL_COUNTS 0
+//#define SET_ERROR_AND_FAIL_COUNTS 0
 
 #define DS_BUFF_SIZE 128
 #define DS_TEMP_LSB 0
@@ -73,12 +73,14 @@
 #define SERV_ERROR_BAD_REQUEST 0x01
 #define SERV_ERROR_NONE 0x00
 
+#define SERV_AVG_MIN_BUFF 4
+
 #define SERV_TEXT 0x80
 #define SERV_AVG 0x40
 #define SERV_SENSOR_ERRORS 0x20
 #define SERV_HISTORY 0x10
 #define SERV_DELTA 0x08
-#define SERV_LOG 0x04
+// #define SERV_LOG 0x04
 #define SERV_SENSORS 0x02
 #define SERV_ERR 0x01
 #define SERV_UNDEFINED 0x00
@@ -100,7 +102,6 @@ DallasTemperature ds(&oneWire);
 
 Watchdog watchdog;
 
-uint32_t servLastCheck = 0;
 uint32_t dsLastRequest = 0;
 uint16_t dsInterval = DS_INIT_TIME;
 uint32_t dsCycleCount = 0;
@@ -172,133 +173,143 @@ inline void swapSort(){
   pageSwitch &= ~PAGE_SWITCH_SORTED; 
 }
 
+inline void unSelectNumberPageSwitches(){
+  pageSwitch &= ~PAGE_SWITCH_GET_HISTORY_SIZE;
+  pageSwitch &= ~PAGE_SWITCH_GET_PRECISION; 
+}
+
+inline void selectGetHistorySizePageSwitch(){
+  pageSwitch |= PAGE_SWITCH_GET_HISTORY_SIZE;
+  pageSwitch &= ~PAGE_SWITCH_GET_PRECISION;
+}
+
 void setup() {
   delay(1000);
   Ethernet.init(10);
   SPI.begin();
   Ethernet.begin(mac, ip);
-  #ifdef SERIAL_EN
-    Serial.begin(SERIAL_BAUD);
-    while (!Serial) {
-      ; // wait for serial port to connect. Needed for native USB port only
-    }
-    Serial.print("Dallas temp lib version: ");
-    Serial.println(DALLASTEMPLIBVERSION);
-    Serial.println();
-  #endif
+#ifdef SERIAL_EN
+  Serial.begin(SERIAL_BAUD);
+  while (!Serial) {
+    ; // wait for serial port to connect. Needed for native USB port only
+  }
+  Serial.print("Dallas temp lib version: ");
+  Serial.println(DALLASTEMPLIBVERSION);
+  Serial.println();
+#endif
   oneWire.depower();
   ds.begin();
   
-  #ifdef SEARCH_DS_ADDR
-    aaa = ds.getDS18Count();
-    Serial.println("{");
-    for (iii = 0; iii < aaa; iii++){
-      ds.getAddress(dsAddr, iii);
-      Serial.print("{");
-      for (jjj = 0; jjj < 8; jjj++){
-        Serial.print("0x");
-        if ((dsAddr)[jjj] < 16){
-          Serial.print(0);
-        }
-        Serial.print((dsAddr)[jjj], HEX);
-        if (jjj < 7){
-          Serial.print(", ");
-        }    
+#ifdef SEARCH_DS_ADDR
+  aaa = ds.getDS18Count();
+  Serial.println("{");
+  for (iii = 0; iii < aaa; iii++){
+    ds.getAddress(dsAddr, iii);
+    Serial.print("{");
+    for (jjj = 0; jjj < 8; jjj++){
+      Serial.print("0x");
+      if ((dsAddr)[jjj] < 16){
+        Serial.print(0);
       }
+      Serial.print((dsAddr)[jjj], HEX);
+      if (jjj < 7){
+        Serial.print(", ");
+      }    
+    }
 
-      Serial.print("}");
-      if (iii < 7){
-        Serial.print(",");
-      }
-      Serial.println();    
-      ds.setResolution(dsAddr, 12);
+    Serial.print("}");
+    if (iii < 7){
+      Serial.print(",");
     }
-    Serial.println("}");
-    Serial.print("Device count:");
-    Serial.println(aaa);
-  #else
-    for (iii = 0; iii < DS_DEVICE_COUNT; iii++){
-      adr = dsProgMemAddr + (iii * DS_ADDRESS_SIZE);
-      #ifdef SERIAL_EN
-        Serial.println();
-        Serial.print(iii);
-        Serial.print(": ");
-      #endif 
-      for (jjj = 0; jjj < DS_ADDRESS_SIZE; jjj++){
-        (dsAddr)[jjj] = pgm_read_byte_near(adr + jjj);
-        #ifdef SERIAL_EN
-          if ((dsAddr)[jjj] < 16){
-            Serial.print(0);
-          }
-          Serial.print((dsAddr)[jjj], HEX);
-          if (jjj < 7){
-            Serial.print(", ");
-          }
-        #endif
+    Serial.println();    
+    ds.setResolution(dsAddr, 12);
+  }
+  Serial.println("}");
+  Serial.print("Device count:");
+  Serial.println(aaa);
+#else
+  for (iii = 0; iii < DS_DEVICE_COUNT; iii++){
+    adr = dsProgMemAddr + (iii * DS_ADDRESS_SIZE);
+ #ifdef SERIAL_EN
+    Serial.println();
+    Serial.print(iii);
+    Serial.print(": ");
+ #endif 
+    for (jjj = 0; jjj < DS_ADDRESS_SIZE; jjj++){
+      (dsAddr)[jjj] = pgm_read_byte_near(adr + jjj);
+ #ifdef SERIAL_EN
+      if ((dsAddr)[jjj] < 16){
+        Serial.print(0);
       }
-      ds.setResolution(dsAddr, 12);    
+      Serial.print((dsAddr)[jjj], HEX);
+      if (jjj < 7){
+        Serial.print(", ");
+      }
+ #endif
     }
-    #ifdef SERIAL_EN
-      Serial.println(); 
-    #endif 
-  #endif
+    ds.setResolution(dsAddr, 12);    
+  }
+ #ifdef SERIAL_EN
+  Serial.println(); 
+ #endif 
+#endif
 
   ds.setWaitForConversion(false);
   dsLastRequest = millis();
 
   if (Ethernet.hardwareStatus() == EthernetHardwareStatus::EthernetNoHardware) {
-    #ifdef SERIAL_EN
-      Serial.println("ENC28J60 not found.");
-    #endif
+#ifdef SERIAL_EN
+    Serial.println("ENC28J60 not found.");
+#endif
     while(1){
       delay(1);
     }
   }
 
-  #ifdef SERIAL_EN
-    if (Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF) {
-      Serial.println("Ethernet not connected.");
-    } else {
-      Serial.println("Ethernet ok.");
-    }
-  #endif 
+#ifdef SERIAL_EN
+  if (Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF) {
+    Serial.println("Ethernet not connected.");
+  } else {
+    Serial.println("Ethernet ok.");
+  }
+#endif 
 
   server.begin();
 
-  #if !defined(SEARCH_DS_ADDR) && defined(SERIAL_EN)
-    Serial.println();
-    Serial.print("Device count: ");
-    Serial.print(DS_DEVICE_COUNT);
-    Serial.print(", Buffersize: ");
-    Serial.println(DS_BUFF_SIZE);
-  #endif
+#if !defined(SEARCH_DS_ADDR) && defined(SERIAL_EN)
+  Serial.println();
+  Serial.print("Device count: ");
+  Serial.print(DS_DEVICE_COUNT);
+  Serial.print(", Buffersize: ");
+  Serial.println(DS_BUFF_SIZE);
+#endif
 
-  #ifdef SET_ERROR_AND_FAIL_COUNTS
-    ui16 = SET_ERROR_AND_FAIL_COUNTS;
-    for (iii = 0; iii < DS_DEVICE_COUNT; iii++){
-      EEPROM.put(EEPROM_ERROR_COUNT + (iii * 4), ui16);
-      EEPROM.put(EEPROM_FAIL_COUNT + (iii * 4), ui16);
-    }
-    #ifdef SERIAL_EN
-      Serial.print("Set sensor error ");
-      Serial.print("and fail counts to ");
-      Serial.println(SET_ERROR_AND_FAIL_COUNTS);
-    #endif
-  #endif 
-
-  #ifdef SET_BOOT_COUNT
-    bootCount = SET_BOOT_COUNT;
-  #else
-    EEPROM.get(EEPROM_BOOT_COUNT, bootCount);
-    bootCount++;   
+#ifdef SET_ERROR_AND_FAIL_COUNTS
+  ui16 = SET_ERROR_AND_FAIL_COUNTS;
+  for (iii = 0; iii < DS_DEVICE_COUNT; iii++){
+    EEPROM.put(EEPROM_ERROR_COUNT + (iii * 4), ui16);
+    EEPROM.put(EEPROM_FAIL_COUNT + (iii * 4), ui16);
+  }
+  #ifdef SERIAL_EN
+  Serial.print("Set sensor error ");
+  Serial.print("and fail counts to ");
+  Serial.println(SET_ERROR_AND_FAIL_COUNTS);
   #endif
+#endif 
+
+#ifdef SET_BOOT_COUNT
+  bootCount = SET_BOOT_COUNT;
+#else
+  EEPROM.get(EEPROM_BOOT_COUNT, bootCount);
+  bootCount++;   
+#endif
 
   EEPROM.put(EEPROM_BOOT_COUNT, bootCount);
 
-  #ifdef SERIAL_EN
-    Serial.print("Boot count: ");
-    Serial.println(bootCount);
-  #endif
+#ifdef SERIAL_EN
+  Serial.print("Boot count: ");
+  Serial.println(bootCount);
+#endif
 
   delay(1000);
 
@@ -308,7 +319,7 @@ void setup() {
 void loop() {
   watchdog.reset();
 
-  #ifndef SEARCH_DS_ADDR
+#ifndef SEARCH_DS_ADDR
   if (DS_DEVICE_COUNT && (millis() - dsLastRequest > dsInterval)) {
     if (dsStatus & DS_READ){
       ScratchPad scratchPad;
@@ -318,13 +329,13 @@ void loop() {
         dsTemp[dsIndex] = (((int16_t) scratchPad[DS_TEMP_MSB]) << 11)
           | (((int16_t) scratchPad[DS_TEMP_LSB]) << 3);
 
-        #ifdef SERIAL_EN
-          if (!dsIndex){ 
-            Serial.print("*");
-            Serial.print((float) dsTemp[dsIndex] * DS_RAW_TO_C_MUL);
-            Serial.print("* ");
-          }
-        #endif
+#ifdef SERIAL_EN
+        if (!dsIndex){ 
+          Serial.print("*");
+          Serial.print((float) dsTemp[dsIndex] * DS_RAW_TO_C_MUL);
+          Serial.print("* ");
+        }
+#endif
 
         if (dsCycleCount){
           if (dsTemp[dsIndex] == dsBufferedTemp[dsIndex]){
@@ -343,34 +354,34 @@ void loop() {
           bitClear(dsBuffChange[dsBuffIndex], dsIndex);
         }
 
-        #ifdef SERIAL_EN
-          Serial.print(dsTemp[dsIndex]);
-          if (dsCycleCount){
-            Serial.print(" (");
-            if (bit_is_set(dsBuffChange[dsBuffIndex], dsIndex)){
-              if (bit_is_set(dsBuffAmount[dsBuffIndex], dsIndex)){
-                Serial.print("+");
-              } else {
-                Serial.print("-");
-              }
-              Serial.print(DS_FILTER_ADAPT_STEP);
+#ifdef SERIAL_EN
+        Serial.print(dsTemp[dsIndex]);
+        if (dsCycleCount){
+          Serial.print(" (");
+          if (bit_is_set(dsBuffChange[dsBuffIndex], dsIndex)){
+            if (bit_is_set(dsBuffAmount[dsBuffIndex], dsIndex)){
+              Serial.print("+");
             } else {
-              Serial.print("0");            
+              Serial.print("-");
             }
-            Serial.print(")");
+            Serial.print(DS_FILTER_ADAPT_STEP);
+          } else {
+            Serial.print("0");            
           }
-          Serial.print(", ");
-        #endif
+          Serial.print(")");
+        }
+        Serial.print(", ");
+#endif
 
         dsStatus = DS_INDEX;
         dsInterval = DS_READ_TIME;
       } else {
 
-        #ifdef SERIAL_EN
-          Serial.print("ERR");
-          Serial.print(dsRetryCount);
-          Serial.print(" ");
-        #endif
+#ifdef SERIAL_EN
+        Serial.print("ERR");
+        Serial.print(dsRetryCount);
+        Serial.print(" ");
+#endif
 
         dsRetryCount++;
 
@@ -418,9 +429,9 @@ void loop() {
         if (dsBuffIndex >= DS_BUFF_SIZE){
           dsBuffIndex = 0;
 
-          #ifdef SERIAL_EN
-            Serial.println("BUFF0 ");
-          #endif
+#ifdef SERIAL_EN
+          Serial.println("BUFF0 ");
+#endif
         }
       }
 
@@ -429,20 +440,20 @@ void loop() {
 
     } else if (dsStatus & DS_REQUEST) {
 
-      #ifdef SERIAL_EN      
-        if (!dsRetryCount){
-          if (!dsIndex){
-            Serial.println();
-            Serial.print("Cycle #");
-            Serial.print(dsCycleCount);
-            Serial.print(" ");           
-          }
-
-          Serial.print("i");
-          Serial.print(dsIndex);
-          Serial.print(": ");
+#ifdef SERIAL_EN      
+      if (!dsRetryCount){
+        if (!dsIndex){
+          Serial.println();
+          Serial.print("Cycle #");
+          Serial.print(dsCycleCount);
+          Serial.print(" ");           
         }
-      #endif
+
+        Serial.print("i");
+        Serial.print(dsIndex);
+        Serial.print(": ");
+      }
+#endif
 
       adr = dsProgMemAddr + (dsIndex * DS_ADDRESS_SIZE);
       for (aaa = 0; aaa < DS_ADDRESS_SIZE; aaa++){
@@ -451,13 +462,13 @@ void loop() {
 
       ds.requestTemperaturesByAddress(dsAddr);
       
-      #ifdef SERIAL_EN
-        if (dsRetryCount){
-          Serial.print("REQ");
-          Serial.print(dsRetryCount / 16);
-          Serial.print(" ");
-        } 
-      #endif
+#ifdef SERIAL_EN
+      if (dsRetryCount){
+        Serial.print("REQ");
+        Serial.print(dsRetryCount / 16);
+        Serial.print(" ");
+      } 
+#endif
 
       dsInterval = DS_REQUEST_TIME + (dsRetryCount % DS_RETRY_INCREASE_TIME);
       dsStatus = DS_READ;
@@ -470,21 +481,7 @@ void loop() {
    * Listen ethernet clients
    */
 
-  if (millis() - servLastCheck > SERV_CHECK_CONN_INTERVAL) {
-    if (Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF) {
-      #ifdef SERIAL_EN
-        Serial.print("Ethernet ");
-        Serial.print("not connected, ");
-        Serial.println("reset shield.");
-      #endif
-      Ethernet.begin(mac, ip);      
-    } else {
-      #ifdef SERIAL_EN
-        Serial.print("{>Eth.ok<}");
-      #endif
-    }
-    servLastCheck = millis();
-  }
+  Ethernet.maintain();
 
   EthernetClient client = server.available();
 
@@ -492,10 +489,10 @@ void loop() {
     return;
   }
 
-  #ifdef SERIAL_EN
-    Serial.println("HTTP ");
-    Serial.println("client >>");
-  #endif
+#ifdef SERIAL_EN
+  Serial.println("HTTP ");
+  Serial.println("client >>");
+#endif
 
   prevClientChar = PAGE_PREVIOUS_CHAR_INIT;
   clientChar = PAGE_CHAR_INIT;
@@ -518,9 +515,9 @@ void loop() {
       clientCharPos++;      
     }
 
-    #ifdef SERIAL_EN
-      Serial.print((char) clientChar);
-    #endif
+#ifdef SERIAL_EN
+    Serial.print((char) clientChar);
+#endif
 
     if (pageSwitch & PAGE_SWITCH_GET_PATH){
       switch (clientChar){
@@ -528,60 +525,58 @@ void loop() {
           pageSwitch &= ~PAGE_SWITCH_GET_PATH;
           serv |= SERV_SENSORS;
           break;
-        case '/':
-          pageSwitch &= ~PAGE_SWITCH_GET_HISTORY_SIZE;
-          pageSwitch &= ~PAGE_SWITCH_GET_PRECISION;
-          break;
         case 'a':
-          pageSwitch |= PAGE_SWITCH_GET_HISTORY_SIZE;
           serv |= SERV_AVG;
+          selectGetHistorySizePageSwitch();          
           break;
         case 't':
           serv |= SERV_TEXT;
+          unSelectNumberPageSwitches();
           break;
         case 'e':
           serv |= SERV_SENSOR_ERRORS;
+          unSelectNumberPageSwitches();
           break;
         case 's':
           pageSwitch |= PAGE_SWITCH_SORT_SENSORS;
+          unSelectNumberPageSwitches();
           break;
         case 'p':
           pageSwitch |= PAGE_SWITCH_GET_PRECISION;
+          pageSwitch &= ~PAGE_SWITCH_GET_HISTORY_SIZE;
           break;
         case 'h':
-          pageSwitch |= PAGE_SWITCH_GET_HISTORY_SIZE;
           serv |= SERV_HISTORY;
+          selectGetHistorySizePageSwitch();  
           break;
         case 'd':
-          pageSwitch |= PAGE_SWITCH_GET_HISTORY_SIZE;
           serv |= SERV_DELTA;
+          selectGetHistorySizePageSwitch();
           break;
-        #ifdef EEPROM_LOG
-          case 'l':
-            serv |= SERV_LOG;
-            break;
-        #endif 
         #ifdef DEBUG_SERVER
           case 'n':
             serv |= SERV_ERR;
             servError |= SERV_ERROR_NOT_FOUND;
+            unSelectNumberPageSwitches();
             break;
           case 'u':
             serv |= SERV_ERR;
             servError |= SERV_ERROR_SERVICE_UNAVAILABLE;
+            unSelectNumberPageSwitches();
             break;
           case 'b':
             serv |= SERV_ERR;
             servError |= SERV_ERROR_BAD_REQUEST;
+            unSelectNumberPageSwitches();
             break;
           case 'i':
             serv |= SERV_ERR;
+            unSelectNumberPageSwitches();
             break;
         #endif
         case '0' ... '9':
           if (pageSwitch & PAGE_SWITCH_GET_PRECISION){
             pageSwitch &= ~PAGE_SWITCH_GET_PRECISION;
-            pageSwitch &= ~PAGE_SWITCH_GET_HISTORY_SIZE;
             if (clientChar > '3'){
               break;
             }
@@ -605,6 +600,7 @@ void loop() {
           sensors |= 1 << (clientChar - '0');
           break;
         default:
+          unSelectNumberPageSwitches();       
           break;
       }
     } else if (serv == SERV_UNDEFINED){
@@ -655,6 +651,19 @@ void loop() {
     }
 
     if (serv & SERV_AVG){
+      // minimum buffer size required for average
+      if (historySize < SERV_AVG_MIN_BUFF){
+        historySize = SERV_AVG_MIN_BUFF;
+      }
+      if (historySize > dsCycleCount){
+        serv &= ~SERV_AVG;
+        serv |= SERV_ERR;
+        servError |= SERV_ERROR_SERVICE_UNAVAILABLE;
+      }
+    }
+
+    if (serv & SERV_AVG){
+      Serial.print("AVG----");
       for (iii = 0; iii < DS_DEVICE_COUNT; iii++){
         workAry[iii] = dsBufferedTemp[iii];
         dsWeightCount[iii] = 0;
@@ -714,39 +723,39 @@ void loop() {
         }
       }
 
-      #ifdef SERIAL_EN
-        Serial.print("-- avg");
-        if (pageSwitch & PAGE_SWITCH_SORT_SENSORS){
-          Serial.print(", sorted");
+#ifdef SERIAL_EN
+      Serial.print("-- avg");
+      if (pageSwitch & PAGE_SWITCH_SORT_SENSORS){
+        Serial.print(", sorted");
+      }
+      Serial.println(" --");
+      Serial.print("acc: ");
+      Serial.print(i32);
+      Serial.print(", n: ");
+      Serial.print(i16);
+      Serial.print(", used: ");
+      for (jjj = 0; jjj < DS_DEVICE_COUNT; jjj++){
+        if (dsWeightCount[DS_DEVICE_COUNT - jjj - 1]){
+          Serial.print('1');
+          continue;
+        } 
+        Serial.print('0');  
+      }
+      Serial.println();
+      for (jjj = 0; jjj < DS_DEVICE_COUNT; jjj++){
+        if (!dsWeightCount[jjj]){
+          continue;
         }
-        Serial.println(" --");
-        Serial.print("acc: ");
-        Serial.print(i32);
-        Serial.print(", n: ");
-        Serial.print(i16);
-        Serial.print(", used: ");
-        for (jjj = 0; jjj < DS_DEVICE_COUNT; jjj++){
-          if (dsWeightCount[DS_DEVICE_COUNT - jjj - 1]){
-            Serial.print('1');
-            continue;
-          } 
-          Serial.print('0');  
-        }
-        Serial.println();
-        for (jjj = 0; jjj < DS_DEVICE_COUNT; jjj++){
-          if (!dsWeightCount[jjj]){
-            continue;
-          }
-          Serial.print("i");
-          Serial.print(jjj);
-          Serial.print(": ");
-          Serial.print(dsWeightCount[jjj]);
-          Serial.print(", ");   
-        }
-        Serial.println();
-        Serial.println(((float) i32 / i16) * DS_RAW_TO_C_MUL, precision);
-        Serial.println("-- --");
-      #endif
+        Serial.print("i");
+        Serial.print(jjj);
+        Serial.print(": ");
+        Serial.print(dsWeightCount[jjj]);
+        Serial.print(", ");   
+      }
+      Serial.println();
+      Serial.println(((float) i32 / i16) * DS_RAW_TO_C_MUL, precision);
+      Serial.println("-- --");
+#endif
     } // if SERV_AVG
 
     client.print("HTTP/1.1");
