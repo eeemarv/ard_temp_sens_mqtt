@@ -2,33 +2,30 @@
 #include <SPI.h>
 #include <EEPROM.h>
 #include <EthernetENC.h>
-#include <DallasTemperature.h>
 #include <Watchdog.h>
 
 #define SERIAL_BAUD 115200
 // #define SERIAL_EN
 // #define DEBUG_SERVER
-// #define SEARCH_DS_ADDR
 #define DS_READ_TEST
 
 #define EEPROM_BOOT_COUNT 0x00
-//#define SET_BOOT_COUNT 0
+#define SET_BOOT_COUNT 0
 #define EEPROM_ERROR_COUNT 0x20
 #define EEPROM_FAIL_COUNT 0x40
-//#define SET_ERROR_AND_FAIL_COUNTS 0
+#define SET_ERROR_AND_FAIL_COUNTS 0
 
 #define DS_BUFF_SIZE 128
 #define DS_TEMP_LSB 0
 #define DS_TEMP_MSB 1
-#define ONE_WIRE_BUS 2
 #define DS_RAW_TO_C_MUL 0.0078125f
 #define DS_FILTER_ADAPT_STEP 4
 
 #define DS_INIT_TIME 2000
-#define DS_REQUEST_TIME 800
+#define DS_REQUEST_TIME 850
 #define DS_RETRY_REQUEST_TIME 900
-#define DS_READ_TIME 100
-#define DS_RETRY_TIME 150
+#define DS_READ_TIME 50
+#define DS_RETRY_TIME 100
 #define DS_FAIL_TIME 50
 #define DS_INDEX_TIME 100
 #define DS_MAX_RETRY 64
@@ -90,15 +87,37 @@
 #define ACC_COUNT_RESET 0
 #define ACC_RESET 0
 
-typedef uint8_t ScratchPad[9];
+#define PWM_PD PD3
+#define PWM_LEVEL 220
+
+#define ONE_WIRE_WRITE_ZERO PORTD &= B00000100; // PD2 always kept zero, just pull/release called (direction input/output register)
+#define ONE_WIRE_RELEASE DDRD &= B11111011; // PD 2 
+#define ONE_WIRE_PULL_LOW DDRD |= B00000100; // PD 2
+#define ONE_WIRE_SAMPLE (ACSR & B00100000)  // ACO (comparator output)
+
+#define DS_MATCH_ROM_COMMAND 0x55
+#define DS_CONVERT_TEMP_COMMAND 0x44
+#define DS_READ_SCRATCHPAD_COMMAND 0xbe
+#define DS_WRITE_SCRATCHPAD_COMMAND 0x4e
+#define DS_COPY_SCRATCHPAD_COMMAND 0x48
+
+#define DS_CONFIG_12_BIT 0x7f
+#define DS_SCRATCHPAD_TEMP_LSB 0
+#define DS_SCRATCHPAD_TEMP_MSB 1
+#define DS_SCRATCHPAD_REG_TH 2
+#define DS_SCRATCHPAD_REG_TL 3
+#define DS_SCRATCHPAD_CONFIG 4
+#define DS_SCRATCHPAD_RESERVED_5 5
+#define DS_SCRATCHPAD_RESERVED_6 6
+#define DS_SCRATCHPAD_RESERVED_7 7
+#define DS_SCRATCHPAD_CRC 8
+#define DS_SCRATCHPAD_SIZE 9
+typedef uint8_t DsScratchPad[DS_SCRATCHPAD_SIZE];
 
 const byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 // const IPAddress ip(10, 200, 125, 80);
 const IPAddress ip(192, 168, 1, 180);
 EthernetServer server(80);
-
-OneWire oneWire(ONE_WIRE_BUS);
-DallasTemperature ds(&oneWire);
 
 Watchdog watchdog;
 
@@ -117,6 +136,8 @@ uint8_t dsWeightCount[DS_DEVICE_COUNT];
 uint8_t dsBuffIndex = 0;
 int8_t dsBuffChange[DS_BUFF_SIZE];
 int8_t dsBuffAmount[DS_BUFF_SIZE];
+DsScratchPad dsScratchPad;
+
 uint16_t bootCount;
 
 int16_t i16;
@@ -140,20 +161,26 @@ uint8_t serv;
 uint8_t servError;
 
 const uint8_t* adr;
-DeviceAddress dsAddr;
 
-#ifndef SEARCH_DS_ADDR
-  const PROGMEM uint8_t dsProgMemAddr[] = {
-    0x28, 0x18, 0x39, 0x15, 0x12, 0x21, 0x01, 0x74,
-    0x28, 0xDC, 0x17, 0xCA, 0x11, 0x21, 0x01, 0x12,
-    0x28, 0x22, 0x0C, 0x11, 0x12, 0x21, 0x01, 0x0E,
-    0x28, 0x32, 0xDB, 0x09, 0x12, 0x21, 0x01, 0x7E,
-    0x28, 0xF1, 0x3F, 0x00, 0x12, 0x21, 0x01, 0xEE,
-    0x28, 0xB9, 0xC1, 0x10, 0x12, 0x21, 0x01, 0x06,
-    0x28, 0xAD, 0x0A, 0xBA, 0x11, 0x21, 0x01, 0x85,
-    0x28, 0x2B, 0x9F, 0x04, 0x12, 0x21, 0x01, 0xD8
-  };
-#endif 
+const PROGMEM uint8_t dsProgMemAddr[] = {
+  0x28, 0x18, 0x39, 0x15, 0x12, 0x21, 0x01, 0x74,
+  0x28, 0xDC, 0x17, 0xCA, 0x11, 0x21, 0x01, 0x12,
+  0x28, 0x22, 0x0C, 0x11, 0x12, 0x21, 0x01, 0x0E,
+  0x28, 0x32, 0xDB, 0x09, 0x12, 0x21, 0x01, 0x7E,
+  0x28, 0xF1, 0x3F, 0x00, 0x12, 0x21, 0x01, 0xEE,
+  0x28, 0xB9, 0xC1, 0x10, 0x12, 0x21, 0x01, 0x06,
+  0x28, 0xAD, 0x0A, 0xBA, 0x11, 0x21, 0x01, 0x85,
+  0x28, 0x2B, 0x9F, 0x04, 0x12, 0x21, 0x01, 0xD8
+};
+// Dow-CRC using polynomial X^8 + X^5 + X^4 + X^0
+// Tiny 2x16 entry CRC table created by Arjen Lentz
+// See http://lentz.com.au/blog/calculating-crc-with-a-tiny-32-entry-lookup-table
+static const uint8_t PROGMEM dscrc2x16_table[] = {
+	0x00, 0x5E, 0xBC, 0xE2, 0x61, 0x3F, 0xDD, 0x83,
+	0xC2, 0x9C, 0x7E, 0x20, 0xA3, 0xFD, 0x1F, 0x41,
+	0x00, 0x9D, 0x23, 0xBE, 0x46, 0xDB, 0x65, 0xF8,
+	0x8C, 0x11, 0xAF, 0x32, 0xCA, 0x57, 0xE9, 0x74
+};
 
 inline void setPrevReadBuffIndex(){
   if (!readSensorIndex){
@@ -183,8 +210,122 @@ inline void selectGetHistorySizePageSwitch(){
   pageSwitch &= ~PAGE_SWITCH_GET_PRECISION;
 }
 
+inline uint8_t oneWireReset(){
+	uint8_t retries = 200;
+
+  ONE_WIRE_RELEASE; 
+	// wire has to be high 
+	do {
+		if (retries == 0){
+      return 0;
+    }
+		delayMicroseconds(20); // was 2
+    retries--;
+	} while (!ONE_WIRE_SAMPLE);
+
+  ONE_WIRE_PULL_LOW;
+	delayMicroseconds(500);
+  noInterrupts();
+  ONE_WIRE_RELEASE; // ds responds 15 to 60µS
+  delayMicroseconds(70);
+  if (ONE_WIRE_SAMPLE){
+    interrupts();
+    delayMicroseconds(500);
+    return 0; // no ds responded
+  }
+  interrupts();
+  delayMicroseconds(500);
+  return 1;
+}
+
+inline void oneWireWrite(uint8_t v){
+  uint8_t bitMask = 0x01;
+
+  for(bitMask = 0x01; bitMask; bitMask <<= 1){
+    noInterrupts();
+    ONE_WIRE_PULL_LOW;
+    delayMicroseconds(12); // measured 10µs 
+    if (v & bitMask){
+      ONE_WIRE_RELEASE;
+    }
+    interrupts();
+    delayMicroseconds(80);
+    ONE_WIRE_RELEASE;
+    delayMicroseconds(20);
+  }
+}
+
+inline uint8_t oneWireRead(){
+  uint8_t bitMask;
+  uint8_t v = 0x00;
+
+  for (bitMask = 0x01; bitMask; bitMask <<= 1){
+    noInterrupts();
+    ONE_WIRE_PULL_LOW;
+    delayMicroseconds(7); // measured 6µs (including pull & relaese)
+    ONE_WIRE_RELEASE;
+    delayMicroseconds(8); // sample just before 15µs
+    if (ONE_WIRE_SAMPLE){
+      v |= bitMask;
+    }
+    interrupts();
+    delayMicroseconds(100); // we're not in hurry
+  }
+  return v;
+}
+
+inline void oneWireRomSelect(){
+  uint8_t i;
+  const uint8_t* adr;
+
+  oneWireWrite(DS_MATCH_ROM_COMMAND);
+  adr = dsProgMemAddr + (dsIndex * DS_ADDRESS_SIZE);
+  for (i = 0; i < DS_ADDRESS_SIZE; i++){
+    oneWireWrite(pgm_read_byte_near(adr + i));
+  }
+}
+
+inline uint8_t oneWireReadDsScratchPath(){
+  uint8_t i;
+  uint8_t crc = 0;
+
+  if (!oneWireReset()){
+    return 0;
+  }
+  oneWireRomSelect();
+  oneWireWrite(DS_READ_SCRATCHPAD_COMMAND);
+  for (i = 0; i < DS_SCRATCHPAD_SIZE; i++){
+    dsScratchPad[i] = oneWireRead();
+  }
+  for (i = 0; i < DS_SCRATCHPAD_SIZE; i++){
+		if (dsScratchPad[i] != 0) {
+			break;
+		}
+    return 0;
+	}
+  for(i = 0; i < DS_SCRATCHPAD_SIZE - 1; i++){
+    crc ^= dsScratchPad[i];
+		crc = pgm_read_byte(dscrc2x16_table + (crc & 0x0f)) ^
+		  pgm_read_byte(dscrc2x16_table + 16 + ((crc >> 4) & 0x0f));
+  }
+  if (crc == dsScratchPad[DS_SCRATCHPAD_CRC]){
+    return 1;
+  }
+  return 0;
+}
+
 void setup() {
-  delay(1000);
+  delay(500);
+  DDRD |= 1 << PWM_PD; // set to output
+  analogWrite(PWM_PD, PWM_LEVEL); // pinMode output is included in this
+  TCCR2B = (TCCR2B & 0xf0) | 0x01; // PWM freq 31kHz+
+  DDRD &= B00111111; // PD7 & PD6 as input for comparator
+  PORTD &= B00111111; // PD7 & PD6 no pull ups
+  ADCSRB &= ~(1 << ACME); // disable MUX analog inputs for analog comparator.
+  ACSR = 0x00; // analog comparator enable, no interrupts, no capture
+  delay(500);
+  ONE_WIRE_RELEASE;
+  ONE_WIRE_WRITE_ZERO;
   Ethernet.init(10);
   SPI.begin();
   Ethernet.begin(mac, ip);
@@ -193,68 +334,31 @@ void setup() {
   while (!Serial) {
     ; // wait for serial port to connect. Needed for native USB port only
   }
-  Serial.print("Dallas temp lib version: ");
-  Serial.println(DALLASTEMPLIBVERSION);
-  Serial.println();
 #endif
-  oneWire.depower();
-  ds.begin();
+
+  delay(250);
   
-#ifdef SEARCH_DS_ADDR
-  aaa = ds.getDS18Count();
-  Serial.println("{");
-  for (iii = 0; iii < aaa; iii++){
-    ds.getAddress(dsAddr, iii);
-    Serial.print("{");
-    for (jjj = 0; jjj < 8; jjj++){
-      Serial.print("0x");
-      if ((dsAddr)[jjj] < 16){
-        Serial.print(0);
-      }
-      Serial.print((dsAddr)[jjj], HEX);
-      if (jjj < 7){
-        Serial.print(", ");
-      }    
+  // set temperature resolution to 12 bit
+  for (dsIndex = 0; dsIndex < DS_DEVICE_COUNT; dsIndex++){
+    oneWireReadDsScratchPath();
+    if (dsScratchPad[DS_SCRATCHPAD_CONFIG] == DS_CONFIG_12_BIT){
+      delay(10);
+      continue;
     }
-
-    Serial.print("}");
-    if (iii < 7){
-      Serial.print(",");
-    }
-    Serial.println();    
-    ds.setResolution(dsAddr, 12);
+    oneWireReset();
+    oneWireRomSelect();
+    oneWireWrite(DS_WRITE_SCRATCHPAD_COMMAND);
+    oneWireWrite(dsScratchPad[DS_SCRATCHPAD_REG_TH]);
+    oneWireWrite(dsScratchPad[DS_SCRATCHPAD_REG_TL]);
+    oneWireWrite(DS_CONFIG_12_BIT);
+    delay(10);
+    oneWireReset();
+    oneWireRomSelect();
+    oneWireWrite(DS_COPY_SCRATCHPAD_COMMAND);
+    delay(25);
   }
-  Serial.println("}");
-  Serial.print("Device count:");
-  Serial.println(aaa);
-#else
-  for (iii = 0; iii < DS_DEVICE_COUNT; iii++){
-    adr = dsProgMemAddr + (iii * DS_ADDRESS_SIZE);
- #ifdef SERIAL_EN
-    Serial.println();
-    Serial.print(iii);
-    Serial.print(": ");
- #endif 
-    for (jjj = 0; jjj < DS_ADDRESS_SIZE; jjj++){
-      (dsAddr)[jjj] = pgm_read_byte_near(adr + jjj);
- #ifdef SERIAL_EN
-      if ((dsAddr)[jjj] < 16){
-        Serial.print(0);
-      }
-      Serial.print((dsAddr)[jjj], HEX);
-      if (jjj < 7){
-        Serial.print(", ");
-      }
- #endif
-    }
-    ds.setResolution(dsAddr, 12);    
-  }
- #ifdef SERIAL_EN
-  Serial.println(); 
- #endif 
-#endif
-
-  ds.setWaitForConversion(false);
+  dsIndex = 0;
+  
   dsLastRequest = millis();
 
   if (Ethernet.hardwareStatus() == EthernetHardwareStatus::EthernetNoHardware) {
@@ -275,14 +379,6 @@ void setup() {
 #endif 
 
   server.begin();
-
-#if !defined(SEARCH_DS_ADDR) && defined(SERIAL_EN)
-  Serial.println();
-  Serial.print("Device count: ");
-  Serial.print(DS_DEVICE_COUNT);
-  Serial.print(", Buffersize: ");
-  Serial.println(DS_BUFF_SIZE);
-#endif
 
 #ifdef SET_ERROR_AND_FAIL_COUNTS
   ui16 = SET_ERROR_AND_FAIL_COUNTS;
@@ -311,23 +407,19 @@ void setup() {
   Serial.println(bootCount);
 #endif
 
-  delay(1000);
-
-  watchdog.enable(Watchdog::TIMEOUT_2S);
+  delay(500);
+  watchdog.enable(Watchdog::TIMEOUT_4S);
 }
 
 void loop() {
   watchdog.reset();
 
-#ifndef SEARCH_DS_ADDR
   if (DS_DEVICE_COUNT && (millis() - dsLastRequest > dsInterval)) {
     if (dsStatus & DS_READ){
-      ScratchPad scratchPad;
+      if (oneWireReadDsScratchPath()){
 
-      if (ds.isConnected(dsAddr, scratchPad)) {
-
-        dsTemp[dsIndex] = (((int16_t) scratchPad[DS_TEMP_MSB]) << 11)
-          | (((int16_t) scratchPad[DS_TEMP_LSB]) << 3);
+        dsTemp[dsIndex] = (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_MSB]) << 11)
+          | (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_LSB]) << 3);
 
 #ifdef SERIAL_EN
         if (!dsIndex){ 
@@ -455,13 +547,10 @@ void loop() {
       }
 #endif
 
-      adr = dsProgMemAddr + (dsIndex * DS_ADDRESS_SIZE);
-      for (aaa = 0; aaa < DS_ADDRESS_SIZE; aaa++){
-        (dsAddr)[aaa] = pgm_read_byte_near(adr + aaa);
-      }
+      oneWireReset();
+      oneWireRomSelect();
+      oneWireWrite(DS_CONVERT_TEMP_COMMAND);
 
-      ds.requestTemperaturesByAddress(dsAddr);
-      
 #ifdef SERIAL_EN
       if (dsRetryCount){
         Serial.print("REQ");
@@ -1130,5 +1219,4 @@ void loop() {
   // time for client
   delay(1);
   client.stop();
-  #endif
 }
