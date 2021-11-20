@@ -231,6 +231,7 @@ const PROGMEM uint8_t dsProgMemAddr[] = {
 // Dow-CRC using polynomial X^8 + X^5 + X^4 + X^0
 // Tiny 2x16 entry CRC table created by Arjen Lentz
 // See http://lentz.com.au/blog/calculating-crc-with-a-tiny-32-entry-lookup-table
+// And https://github.com/PaulStoffregen/OneWire
 static const uint8_t PROGMEM dscrc2x16_table[] = {
 	0x00, 0x5E, 0xBC, 0xE2, 0x61, 0x3F, 0xDD, 0x83,
 	0xC2, 0x9C, 0x7E, 0x20, 0xA3, 0xFD, 0x1F, 0x41,
@@ -589,16 +590,9 @@ void loop() {
 
         if (dsRetryCount >= DS_MAX_RETRY){
           DS_NEXT(DS_FAIL, DS_RETRY_TIME);
-          /*
-          dsStatus = DS_FAIL;      
-          dsInterval = DS_RETRY_TIME;
-          */
         } 
         if (dsRetryCount & LOW_NIBBLE){
           DS_NEXT(DS_READ, DS_RETRY_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
-          /*
-          dsStatus = DS_READ;
-          */
         } 
         DS_NEXT(DS_REQUEST, DS_RETRY_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
       }
@@ -650,10 +644,7 @@ void loop() {
 #endif
 
       DS_NEXT(DS_INDEX, DS_READ_TIME);
-      /*
-      dsStatus = DS_INDEX;
-      dsInterval = DS_READ_TIME;
-      */
+
     } else if (dsStatus & DS_FAIL){
 
       // keep same temperature
@@ -662,10 +653,7 @@ void loop() {
       eepromU32Inc(EEPROM_DATA_FAIL_COUNT, dsIndex);
 
       DS_NEXT(DS_INDEX, DS_FAIL_TIME);
-      /*
-      dsStatus = DS_INDEX;
-      dsInterval = DS_FAIL_TIME; 
-      */   
+  
     } else if (dsStatus & DS_INDEX) {
 
       dsRetryCount = 0;
@@ -687,11 +675,6 @@ void loop() {
 
       DS_NEXT(DS_REQUEST, DS_INDEX_TIME);
 
-      /*
-      dsInterval = DS_INDEX_TIME;
-      dsStatus = DS_REQUEST;
-      */
-
     } else if (dsStatus & DS_REQUEST) {
 
 #ifdef SERIAL_EN      
@@ -711,12 +694,6 @@ void loop() {
 
       if (!oneWireReset()){
         DS_NEXT(DS_CONNECTION_ERROR, DS_CONNECTION_ERROR_TIME);
-        /*
-        dsInterval = DS_CONNECTION_ERROR_TIME;
-        dsStatus = DS_CONNECTION_ERROR;
-        dsLastRequest = millis();
-        return;
-        */
       }
 
       oneWireRomSelect();
@@ -731,10 +708,7 @@ void loop() {
 #endif
 
       DS_NEXT(DS_READ, DS_REQUEST_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
-      /*
-      dsInterval = DS_REQUEST_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME);
-      dsStatus = DS_READ;
-      */
+
     } else if (dsStatus & DS_CONNECTION_ERROR){
       eepromU32Inc(EEPROM_CONNECTION_ERROR_COUNT, 0);
       dsConnectionErrorCount++;
