@@ -4,16 +4,20 @@
 #include <EthernetENC.h>
 #include <Watchdog.h>
 
+#define ETHERNET_SELECT_PIN 10
 #define SERIAL_BAUD 115200
 // #define SERIAL_EN
 // #define DEBUG_SERVER
 #define DS_READ_TEST
 
 #define EEPROM_BOOT_COUNT 0x00
-#define SET_BOOT_COUNT 0
-#define EEPROM_ERROR_COUNT 0x20
-#define EEPROM_FAIL_COUNT 0x40
-#define SET_ERROR_AND_FAIL_COUNTS 0
+//#define SET_BOOT_COUNT 0
+#define EEPROM_CONNECTION_ERROR_COUNT 0x04
+//#define SET_CONNECTION_ERROR_COUNT 0
+#define EEPROM_DATA_ERROR_COUNT 0x20
+//#define SET_DATA_ERROR_COUNT 0
+#define EEPROM_DATA_FAIL_COUNT 0x40
+//#define SET_DATA_FAIL_COUNT 0
 
 #define DS_BUFF_SIZE 128
 #define DS_TEMP_LSB 0
@@ -30,7 +34,10 @@
 #define DS_INDEX_TIME 100
 #define DS_MAX_RETRY 64
 #define DS_RETRY_INCREASE_TIME 25
+#define DS_CONNECTION_ERROR_TIME 50
+#define DS_RETRY_AFTER_CONNECTION_ERROR_TIME 1000
 
+#define DS_INDEX_INIT 0
 #define DS_DEVICE_COUNT 8
 #define DS_ADDRESS_SIZE 8
 
@@ -38,9 +45,10 @@
 #define DS_READ 0x02
 #define DS_FAIL 0x04
 #define DS_INDEX 0x08
+#define DS_CONNECTION_ERROR 0x10
 
-#define LO_NIBBLE 0x0f
-#define HI_NIBBLE 0xf0
+#define LOW_NIBBLE 0x0f
+#define HIGH_NIBBLE 0xf0
 
 #define PAGE_PREVIOUS_CHAR_INIT 0x00
 #define PAGE_CHAR_INIT 0x00
@@ -82,24 +90,54 @@
 #define SERV_ERR 0x01
 #define SERV_UNDEFINED 0x00
 
-#define SERV_CHECK_CONN_INTERVAL 60000
-
 #define ACC_COUNT_RESET 0
 #define ACC_RESET 0
 
 #define PWM_PD PD3
-#define PWM_LEVEL 220
+#define PWM_LEVEL 15
 
-#define ONE_WIRE_WRITE_ZERO PORTD &= B00000100; // PD2 always kept zero, just pull/release called (direction input/output register)
-#define ONE_WIRE_RELEASE DDRD &= B11111011; // PD 2 
-#define ONE_WIRE_PULL_LOW DDRD |= B00000100; // PD 2
-#define ONE_WIRE_SAMPLE (ACSR & B00100000)  // ACO (comparator output)
+#define ONE_WIRE_PRE_RESET_STABILIZE_TIME 10
+#define ONE_WIRE_RESET_PULSE_TIME 490
+#define ONE_WIRE_RESET_RELEASE_TIME 240
+#define ONE_WIRE_WRITE_INIT_TIME 10
+#define ONE_WIRE_WRITE_ONE_TIME 60
+#define ONE_WIRE_WRITE_ZERO_TIME 60
+#define ONE_WIRE_READ_INIT_TIME 3
+#define ONE_WIRE_READ_SAMPLE_TIME 12
+#define ONE_WIRE_READ_RELEASE_TIME 45
+#define ONE_WIRE_IDLE_TIME 200
 
+#define ONE_WIRE_BITMASK B00010000 // PD4
+#define ONE_WIRE_PORT PORTD
+#define ONE_WIRE_DDR DDRD
+#define ONE_WIRE_LOW ONE_WIRE_PORT &= ~ONE_WIRE_BITMASK;
+#define ONE_WIRE_HIGH ONE_WIRE_PORT |= ONE_WIRE_BITMASK;
+#define ONE_WIRE_RELEASE ONE_WIRE_DDR &= ~ONE_WIRE_BITMASK;
+#define ONE_WIRE_PULL ONE_WIRE_DDR |= ONE_WIRE_BITMASK;
+#define ACO_BITMASK B00100000
+#define ONE_WIRE_SAMPLE (ACSR & ACO_BITMASK)  // comparator output
+
+// test timings on oscilloscope
+#define TEST_TIME_BITMASK B00100000 // PD5
+#define TEST_TIME_PORT PORTD
+#define TEST_TIME_DDR DDRD
+#define TEST_TIME_LOW ONE_WIRE_PORT &= ~TEST_TIME_BITMASK;
+#define TEST_TIME_HIGH ONE_WIRE_PORT |= TEST_TIME_BITMASK;
+#define TEST_TIME_RELEASE ONE_WIRE_DDR &= ~TEST_TIME_BITMASK;
+#define TEST_TIME_PULL ONE_WIRE_DDR |= TEST_TIME_BITMASK;
+#define TEST_TIME_PIN_ENABLE
+
+#define DS_SEARCH_ROM_COMMAND 0xf0
+#define DS_READ_ROM_COMMAND 0x33
 #define DS_MATCH_ROM_COMMAND 0x55
+#define DS_SKIP_ROM_COMMAND 0xcc
+#define DS_ALARM_SEARCH_COMMAND 0xec
 #define DS_CONVERT_TEMP_COMMAND 0x44
 #define DS_READ_SCRATCHPAD_COMMAND 0xbe
 #define DS_WRITE_SCRATCHPAD_COMMAND 0x4e
 #define DS_COPY_SCRATCHPAD_COMMAND 0x48
+#define DS_RECALL_EE_COMMAND 0xb8
+#define DS_READ_POWER_SUPPLY_COMMAND 0xb4
 
 #define DS_CONFIG_12_BIT 0x7f
 #define DS_SCRATCHPAD_TEMP_LSB 0
@@ -114,6 +152,22 @@
 #define DS_SCRATCHPAD_SIZE 9
 typedef uint8_t DsScratchPad[DS_SCRATCHPAD_SIZE];
 
+#define CYCLES_MICROSEC (F_CPU / 1000000)
+
+#define DS_NEXT(DS_STATUS, DS_INTERVAL)\        
+  dsStatus = DS_STATUS;\
+  dsInterval = DS_INTERVAL;\
+  dsLastRequest = millis();\
+  return;
+
+// See https://stackoverflow.com/a/63468969
+template< unsigned N > 
+inline static void nops(){
+  asm ("nop");
+  nops< N - 1 >();
+}
+template<> inline void nops<0>(){};
+
 const byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
 // const IPAddress ip(10, 200, 125, 80);
 const IPAddress ip(192, 168, 1, 180);
@@ -127,7 +181,8 @@ uint32_t dsCycleCount = 0;
 uint8_t dsRetryCount = 0;
 uint8_t dsStatus = DS_REQUEST;
 
-uint8_t dsIndex = 0;
+uint8_t dsIndex = DS_INDEX_INIT;
+uint16_t dsErrorCount[DS_DEVICE_COUNT];
 int16_t dsTemp[DS_DEVICE_COUNT];
 int16_t dsBufferedTemp[DS_DEVICE_COUNT];
 int16_t workAry[DS_DEVICE_COUNT];
@@ -138,14 +193,14 @@ int8_t dsBuffChange[DS_BUFF_SIZE];
 int8_t dsBuffAmount[DS_BUFF_SIZE];
 DsScratchPad dsScratchPad;
 
-uint16_t bootCount;
+uint32_t bootCount;
+uint32_t dsConnectionErrorCount = 0;
 
-int16_t i16;
-int32_t i32;
-uint16_t ui16;
+int16_t rawTemp;
+int16_t accTempCount;
+int32_t accTemp;
 
-uint8_t aaa;
-uint8_t iii;
+uint8_t iii; // iterators
 uint8_t jjj;
 
 uint8_t readSensorIndex;
@@ -172,6 +227,7 @@ const PROGMEM uint8_t dsProgMemAddr[] = {
   0x28, 0xAD, 0x0A, 0xBA, 0x11, 0x21, 0x01, 0x85,
   0x28, 0x2B, 0x9F, 0x04, 0x12, 0x21, 0x01, 0xD8
 };
+
 // Dow-CRC using polynomial X^8 + X^5 + X^4 + X^0
 // Tiny 2x16 entry CRC table created by Arjen Lentz
 // See http://lentz.com.au/blog/calculating-crc-with-a-tiny-32-entry-lookup-table
@@ -210,66 +266,141 @@ inline void selectGetHistorySizePageSwitch(){
   pageSwitch &= ~PAGE_SWITCH_GET_PRECISION;
 }
 
+inline void eepromU32Put(uint16_t location, uint8_t index, uint32_t data){
+  EEPROM.put(location + (index * 4), data);
+}
+
+inline uint32_t eepromU32Get(uint16_t location, uint8_t index){
+  uint32_t data;
+  EEPROM.get(location + (index * 4), data);
+  return data;
+}
+
+inline uint32_t eepromU32Inc(uint16_t location, uint8_t index){
+  uint32_t data;
+  data = eepromU32Get(location, index);
+  data++;
+  eepromU32Put(location, index, data);
+  return data;
+}
+
 inline uint8_t oneWireReset(){
-	uint8_t retries = 200;
+	uint8_t retryCount = 200;
+  uint8_t releaseTime;
 
   ONE_WIRE_RELEASE; 
-	// wire has to be high 
-	do {
-		if (retries == 0){
+
+	// ensure the bus is high 
+  while (!ONE_WIRE_SAMPLE){
+    delayMicroseconds(20);
+    retryCount--;
+    if (!retryCount){
       return 0;
     }
-		delayMicroseconds(20); // was 2
-    retries--;
-	} while (!ONE_WIRE_SAMPLE);
-
-  ONE_WIRE_PULL_LOW;
-	delayMicroseconds(500);
-  noInterrupts();
-  ONE_WIRE_RELEASE; // ds responds 15 to 60µS
-  delayMicroseconds(70);
-  if (ONE_WIRE_SAMPLE){
-    interrupts();
-    delayMicroseconds(500);
-    return 0; // no ds responded
   }
+  ONE_WIRE_HIGH;  
+  ONE_WIRE_PULL;
+  delayMicroseconds(ONE_WIRE_PRE_RESET_STABILIZE_TIME);
+  noInterrupts();  
+  ONE_WIRE_LOW;
+	delayMicroseconds(ONE_WIRE_RESET_PULSE_TIME);
+  ONE_WIRE_HIGH; // ds responds after 15 to 60µS for 60µs to 240µs
+  nops<CYCLES_MICROSEC * 10>();
+  ONE_WIRE_RELEASE;
+#ifdef TEST_TIME_PIN_ENABLE
+  TEST_TIME_HIGH;
+#endif
+  delayMicroseconds(60);
+#ifdef TEST_TIME_PIN_ENABLE
+  TEST_TIME_LOW;
+#endif 
+  if (ONE_WIRE_SAMPLE){
+    delayMicroseconds(240);
+    ONE_WIRE_HIGH;
+    ONE_WIRE_PULL;
+    interrupts();
+    delayMicroseconds(240 + ONE_WIRE_IDLE_TIME);
+    return 0; // no ds response
+  }
+  delayMicroseconds(240);
+  for (releaseTime = ONE_WIRE_RESET_RELEASE_TIME; releaseTime; releaseTime--){
+    if (ONE_WIRE_SAMPLE){
+      break;
+    }
+    nops<(CYCLES_MICROSEC * 1) - 4>();      
+  }
+  ONE_WIRE_HIGH;
+  ONE_WIRE_PULL;  
   interrupts();
-  delayMicroseconds(500);
+  if (releaseTime){
+    delayMicroseconds(releaseTime);
+  }
+  delayMicroseconds(ONE_WIRE_IDLE_TIME);
   return 1;
 }
 
 inline void oneWireWrite(uint8_t v){
   uint8_t bitMask = 0x01;
-
+  // slot 90µs + idle 20µs
   for(bitMask = 0x01; bitMask; bitMask <<= 1){
     noInterrupts();
-    ONE_WIRE_PULL_LOW;
-    delayMicroseconds(12); // measured 10µs 
+    ONE_WIRE_LOW;
+    ONE_WIRE_PULL;
     if (v & bitMask){
-      ONE_WIRE_RELEASE;
+      nops<CYCLES_MICROSEC * ONE_WIRE_WRITE_INIT_TIME>();     
+      ONE_WIRE_HIGH;
+      interrupts();
+      delayMicroseconds(ONE_WIRE_WRITE_ONE_TIME + ONE_WIRE_IDLE_TIME);
+      continue;
     }
+    delayMicroseconds(ONE_WIRE_WRITE_INIT_TIME + ONE_WIRE_WRITE_ZERO_TIME);
+    ONE_WIRE_HIGH;
     interrupts();
-    delayMicroseconds(80);
-    ONE_WIRE_RELEASE;
-    delayMicroseconds(20);
+    delayMicroseconds(ONE_WIRE_IDLE_TIME);      
   }
 }
 
 inline uint8_t oneWireRead(){
   uint8_t bitMask;
   uint8_t v = 0x00;
+  uint8_t releaseTime;
 
   for (bitMask = 0x01; bitMask; bitMask <<= 1){
     noInterrupts();
-    ONE_WIRE_PULL_LOW;
-    delayMicroseconds(7); // measured 6µs (including pull & relaese)
+    ONE_WIRE_LOW;
+    ONE_WIRE_PULL;
+#ifdef TEST_TIME_PIN_ENABLE
+    TEST_TIME_HIGH;
+#endif
+    nops<CYCLES_MICROSEC * ONE_WIRE_READ_INIT_TIME>(); 
     ONE_WIRE_RELEASE;
-    delayMicroseconds(8); // sample just before 15µs
+    ONE_WIRE_HIGH;
+#ifdef TEST_TIME_PIN_ENABLE
+    TEST_TIME_LOW;
+#endif 
+    nops<(CYCLES_MICROSEC * ONE_WIRE_READ_SAMPLE_TIME) - 4>();
+#ifdef TEST_TIME_PIN_ENABLE
+    TEST_TIME_HIGH;
+#endif 
     if (ONE_WIRE_SAMPLE){
       v |= bitMask;
+      ONE_WIRE_PULL;
     }
+    for (releaseTime = ONE_WIRE_READ_RELEASE_TIME; releaseTime; releaseTime--){
+      if (ONE_WIRE_SAMPLE){
+        break;
+      }
+      nops<(CYCLES_MICROSEC * 1) - 4>();      
+    }
+    ONE_WIRE_PULL;
     interrupts();
-    delayMicroseconds(100); // we're not in hurry
+    if (releaseTime){
+      delayMicroseconds(releaseTime);      
+    }
+#ifdef TEST_TIME_PIN_ENABLE
+    TEST_TIME_LOW;
+#endif 
+    delayMicroseconds(ONE_WIRE_IDLE_TIME);
   }
   return v;
 }
@@ -289,10 +420,6 @@ inline uint8_t oneWireReadDsScratchPath(){
   uint8_t i;
   uint8_t crc = 0;
 
-  if (!oneWireReset()){
-    return 0;
-  }
-  oneWireRomSelect();
   oneWireWrite(DS_READ_SCRATCHPAD_COMMAND);
   for (i = 0; i < DS_SCRATCHPAD_SIZE; i++){
     dsScratchPad[i] = oneWireRead();
@@ -324,9 +451,13 @@ void setup() {
   ADCSRB &= ~(1 << ACME); // disable MUX analog inputs for analog comparator.
   ACSR = 0x00; // analog comparator enable, no interrupts, no capture
   delay(500);
-  ONE_WIRE_RELEASE;
-  ONE_WIRE_WRITE_ZERO;
-  Ethernet.init(10);
+  ONE_WIRE_HIGH;  
+  ONE_WIRE_PULL;
+#ifdef TEST_TIME_PIN_ENABLE
+  TEST_TIME_LOW;
+  TEST_TIME_PULL;
+#endif  
+  Ethernet.init(ETHERNET_SELECT_PIN);
   SPI.begin();
   Ethernet.begin(mac, ip);
 #ifdef SERIAL_EN
@@ -357,9 +488,7 @@ void setup() {
     oneWireWrite(DS_COPY_SCRATCHPAD_COMMAND);
     delay(25);
   }
-  dsIndex = 0;
-  
-  dsLastRequest = millis();
+  dsIndex = DS_INDEX_INIT;
 
   if (Ethernet.hardwareStatus() == EthernetHardwareStatus::EthernetNoHardware) {
 #ifdef SERIAL_EN
@@ -380,27 +509,50 @@ void setup() {
 
   server.begin();
 
-#ifdef SET_ERROR_AND_FAIL_COUNTS
-  ui16 = SET_ERROR_AND_FAIL_COUNTS;
-  for (iii = 0; iii < DS_DEVICE_COUNT; iii++){
-    EEPROM.put(EEPROM_ERROR_COUNT + (iii * 4), ui16);
-    EEPROM.put(EEPROM_FAIL_COUNT + (iii * 4), ui16);
+#ifdef SET_DATA_FAIL_COUNT
+  for (dsIndex = 0; dsIndex < DS_DEVICE_COUNT; dsIndex++){
+    eepromU32Put(EEPROM_DATA_FAIL_COUNT, dsIndex, SET_DATA_FAIL_COUNT);
   }
+  dsIndex = DS_INDEX_INIT;
   #ifdef SERIAL_EN
-  Serial.print("Set sensor error ");
-  Serial.print("and fail counts to ");
-  Serial.println(SET_ERROR_AND_FAIL_COUNTS);
+  Serial.print("Set data ");
+  Serial.print("fail ");
+  Serial.print("count to ");
+  Serial.println(SET_DATA_FAIL_COUNT);
+  #endif
+#endif 
+
+#ifdef SET_DATA_ERROR_COUNT
+  for (dsIndex = 0; dsIndex < DS_DEVICE_COUNT; dsIndex++){
+    eepromU32Put(EEPROM_DATA_ERROR_COUNT, dsIndex, SET_DATA_ERROR_COUNT);
+  }
+  dsIndex = DS_INDEX_INIT;
+  #ifdef SERIAL_EN
+  Serial.print("Set data ");
+  Serial.print("error ");
+  Serial.print("count to ");
+  Serial.println(SET_DATA_ERROR_COUNT);
+  #endif
+#endif 
+
+#ifdef SET_CONNECTION_ERROR_COUNT
+  eepromU32Put(EEPROM_CONNECTION_ERROR_COUNT, 0, SET_CONNECTION_ERROR_COUNT);
+  #ifdef SERIAL_EN
+  Serial.print("Set connection ");
+  Serial.print("error ");
+  Serial.print("count to ");
+  Serial.println(SET_CONNECTION_ERROR_COUNT);
   #endif
 #endif 
 
 #ifdef SET_BOOT_COUNT
   bootCount = SET_BOOT_COUNT;
 #else
-  EEPROM.get(EEPROM_BOOT_COUNT, bootCount);
+  bootCount = eepromU32Get(EEPROM_BOOT_COUNT, 0);
   bootCount++;   
 #endif
 
-  EEPROM.put(EEPROM_BOOT_COUNT, bootCount);
+  eepromU32Put(EEPROM_BOOT_COUNT, 0, bootCount);  
 
 #ifdef SERIAL_EN
   Serial.print("Boot count: ");
@@ -408,6 +560,7 @@ void setup() {
 #endif
 
   delay(500);
+  dsLastRequest = millis();
   watchdog.enable(Watchdog::TIMEOUT_4S);
 }
 
@@ -416,59 +569,13 @@ void loop() {
 
   if (DS_DEVICE_COUNT && (millis() - dsLastRequest > dsInterval)) {
     if (dsStatus & DS_READ){
-      if (oneWireReadDsScratchPath()){
+      if (!oneWireReset()){
+        DS_NEXT(DS_CONNECTION_ERROR, DS_CONNECTION_ERROR_TIME);
+      }
 
-        dsTemp[dsIndex] = (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_MSB]) << 11)
-          | (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_LSB]) << 3);
+      oneWireRomSelect();
 
-#ifdef SERIAL_EN
-        if (!dsIndex){ 
-          Serial.print("*");
-          Serial.print((float) dsTemp[dsIndex] * DS_RAW_TO_C_MUL);
-          Serial.print("* ");
-        }
-#endif
-
-        if (dsCycleCount){
-          if (dsTemp[dsIndex] == dsBufferedTemp[dsIndex]){
-            bitClear(dsBuffChange[dsBuffIndex], dsIndex);
-          } else if (dsTemp[dsIndex] < dsBufferedTemp[dsIndex]){
-            dsBufferedTemp[dsIndex] -= DS_FILTER_ADAPT_STEP;
-            bitSet(dsBuffChange[dsBuffIndex], dsIndex);
-            bitClear(dsBuffAmount[dsBuffIndex], dsIndex);  
-          } else {
-            dsBufferedTemp[dsIndex] += DS_FILTER_ADAPT_STEP;
-            bitSet(dsBuffChange[dsBuffIndex], dsIndex);
-            bitSet(dsBuffAmount[dsBuffIndex], dsIndex);             
-          }
-        } else {
-          dsBufferedTemp[dsIndex] = dsTemp[dsIndex];
-          bitClear(dsBuffChange[dsBuffIndex], dsIndex);
-        }
-
-#ifdef SERIAL_EN
-        Serial.print(dsTemp[dsIndex]);
-        if (dsCycleCount){
-          Serial.print(" (");
-          if (bit_is_set(dsBuffChange[dsBuffIndex], dsIndex)){
-            if (bit_is_set(dsBuffAmount[dsBuffIndex], dsIndex)){
-              Serial.print("+");
-            } else {
-              Serial.print("-");
-            }
-            Serial.print(DS_FILTER_ADAPT_STEP);
-          } else {
-            Serial.print("0");            
-          }
-          Serial.print(")");
-        }
-        Serial.print(", ");
-#endif
-
-        dsStatus = DS_INDEX;
-        dsInterval = DS_READ_TIME;
-      } else {
-
+      if (!oneWireReadDsScratchPath()){
 #ifdef SERIAL_EN
         Serial.print("ERR");
         Serial.print(dsRetryCount);
@@ -477,37 +584,88 @@ void loop() {
 
         dsRetryCount++;
 
-        aaa = EEPROM_ERROR_COUNT + (dsIndex * 4);
-        EEPROM.get(aaa, ui16);
-        ui16++;
-        EEPROM.put(aaa, ui16);
+        dsErrorCount[dsIndex]++;
+        eepromU32Inc(EEPROM_DATA_ERROR_COUNT, dsIndex);
 
         if (dsRetryCount >= DS_MAX_RETRY){
+          DS_NEXT(DS_FAIL, DS_RETRY_TIME);
+          /*
           dsStatus = DS_FAIL;      
           dsInterval = DS_RETRY_TIME;
-        } else {
-          if (dsRetryCount & LO_NIBBLE){
-            dsStatus = DS_READ;
-          } else {
-            dsStatus = DS_REQUEST;            
-          }
-          dsInterval = DS_RETRY_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME);
-        }
+          */
+        } 
+        if (dsRetryCount & LOW_NIBBLE){
+          DS_NEXT(DS_READ, DS_RETRY_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
+          /*
+          dsStatus = DS_READ;
+          */
+        } 
+        DS_NEXT(DS_REQUEST, DS_RETRY_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
       }
 
+      dsTemp[dsIndex] = (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_MSB]) << 11)
+        | (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_LSB]) << 3);
+
+#ifdef SERIAL_EN
+      if (!dsIndex){ 
+        Serial.print("*");
+        Serial.print((float) dsTemp[dsIndex] * DS_RAW_TO_C_MUL);
+        Serial.print("* ");
+      }
+#endif
+
+      if (dsCycleCount){
+        if (dsTemp[dsIndex] == dsBufferedTemp[dsIndex]){
+          bitClear(dsBuffChange[dsBuffIndex], dsIndex);
+        } else if (dsTemp[dsIndex] < dsBufferedTemp[dsIndex]){
+          dsBufferedTemp[dsIndex] -= DS_FILTER_ADAPT_STEP;
+          bitSet(dsBuffChange[dsBuffIndex], dsIndex);
+          bitClear(dsBuffAmount[dsBuffIndex], dsIndex);  
+        } else {
+          dsBufferedTemp[dsIndex] += DS_FILTER_ADAPT_STEP;
+          bitSet(dsBuffChange[dsBuffIndex], dsIndex);
+          bitSet(dsBuffAmount[dsBuffIndex], dsIndex);             
+        }
+      } else {
+        dsBufferedTemp[dsIndex] = dsTemp[dsIndex];
+        bitClear(dsBuffChange[dsBuffIndex], dsIndex);
+      }
+#ifdef SERIAL_EN
+      Serial.print(dsTemp[dsIndex]);
+      if (dsCycleCount){
+        Serial.print(" (");
+        if (bit_is_set(dsBuffChange[dsBuffIndex], dsIndex)){
+          if (bit_is_set(dsBuffAmount[dsBuffIndex], dsIndex)){
+            Serial.print("+");
+          } else {
+            Serial.print("-");
+          }
+          Serial.print(DS_FILTER_ADAPT_STEP);
+        } else {
+          Serial.print("0");            
+        }
+        Serial.print(")");
+      }
+      Serial.print(", ");
+#endif
+
+      DS_NEXT(DS_INDEX, DS_READ_TIME);
+      /*
+      dsStatus = DS_INDEX;
+      dsInterval = DS_READ_TIME;
+      */
     } else if (dsStatus & DS_FAIL){
 
       // keep same temperature
       bitClear(dsBuffChange[dsBuffIndex], dsIndex);
 
-      aaa = EEPROM_FAIL_COUNT + (dsIndex * 4);
-      EEPROM.get(aaa, ui16);
-      ui16++;
-      EEPROM.put(aaa, ui16);
+      eepromU32Inc(EEPROM_DATA_FAIL_COUNT, dsIndex);
 
+      DS_NEXT(DS_INDEX, DS_FAIL_TIME);
+      /*
       dsStatus = DS_INDEX;
       dsInterval = DS_FAIL_TIME; 
-   
+      */   
     } else if (dsStatus & DS_INDEX) {
 
       dsRetryCount = 0;
@@ -527,8 +685,12 @@ void loop() {
         }
       }
 
+      DS_NEXT(DS_REQUEST, DS_INDEX_TIME);
+
+      /*
       dsInterval = DS_INDEX_TIME;
       dsStatus = DS_REQUEST;
+      */
 
     } else if (dsStatus & DS_REQUEST) {
 
@@ -547,7 +709,16 @@ void loop() {
       }
 #endif
 
-      oneWireReset();
+      if (!oneWireReset()){
+        DS_NEXT(DS_CONNECTION_ERROR, DS_CONNECTION_ERROR_TIME);
+        /*
+        dsInterval = DS_CONNECTION_ERROR_TIME;
+        dsStatus = DS_CONNECTION_ERROR;
+        dsLastRequest = millis();
+        return;
+        */
+      }
+
       oneWireRomSelect();
       oneWireWrite(DS_CONVERT_TEMP_COMMAND);
 
@@ -559,8 +730,15 @@ void loop() {
       } 
 #endif
 
-      dsInterval = DS_REQUEST_TIME + (dsRetryCount % DS_RETRY_INCREASE_TIME);
+      DS_NEXT(DS_READ, DS_REQUEST_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
+      /*
+      dsInterval = DS_REQUEST_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME);
       dsStatus = DS_READ;
+      */
+    } else if (dsStatus & DS_CONNECTION_ERROR){
+      eepromU32Inc(EEPROM_CONNECTION_ERROR_COUNT, 0);
+      dsConnectionErrorCount++;
+      DS_NEXT(DS_REQUEST, DS_RETRY_AFTER_CONNECTION_ERROR_TIME);
     }
 
     dsLastRequest = millis();
@@ -765,8 +943,8 @@ void loop() {
         setPrevReadBuffIndex();
       }
 
-      i16 = ACC_COUNT_RESET;
-      i32 = ACC_RESET;
+      accTempCount = ACC_COUNT_RESET;
+      accTemp = ACC_RESET;
 
       for (iii = 0; iii < historySize; iii++){
         // sort if required
@@ -793,8 +971,8 @@ void loop() {
           if (bit_is_clear(sensors, jjj)){
             continue;
           }
-          i32 += workAry[dsSort[jjj]];
-          i16++;
+          accTemp += workAry[dsSort[jjj]];
+          accTempCount++;
           dsWeightCount[dsSort[jjj]]++;
         }
 
@@ -819,9 +997,9 @@ void loop() {
       }
       Serial.println(" --");
       Serial.print("acc: ");
-      Serial.print(i32);
+      Serial.print(accTemp);
       Serial.print(", n: ");
-      Serial.print(i16);
+      Serial.print(accTempCount);
       Serial.print(", used: ");
       for (jjj = 0; jjj < DS_DEVICE_COUNT; jjj++){
         if (dsWeightCount[DS_DEVICE_COUNT - jjj - 1]){
@@ -842,7 +1020,7 @@ void loop() {
         Serial.print(", ");   
       }
       Serial.println();
-      Serial.println(((float) i32 / i16) * DS_RAW_TO_C_MUL, precision);
+      Serial.println(((float) accTemp / accTempCount) * DS_RAW_TO_C_MUL, precision);
       Serial.println("-- --");
 #endif
     } // if SERV_AVG
@@ -907,7 +1085,7 @@ void loop() {
       }
 
       if (serv & SERV_AVG){
-        client.print(((float) i32 / i16) * DS_RAW_TO_C_MUL, precision);
+        client.print(((float) accTemp / accTempCount) * DS_RAW_TO_C_MUL, precision);
         break;
       }
 
@@ -920,6 +1098,10 @@ void loop() {
       client.print(bootCount);
       client.print(",\"cycle\":");
       client.print(dsCycleCount);
+      client.print(",\"conn_err\":");
+      client.print(dsConnectionErrorCount);
+      client.print(",\"stored_conn_err\":");
+      client.print(eepromU32Get(EEPROM_CONNECTION_ERROR_COUNT, 0));
       client.print(",");
 
       if (serv & SERV_ERR){
@@ -961,7 +1143,7 @@ void loop() {
 
       if (serv & SERV_AVG){
         client.print("\"avg\":");
-        client.print(((float) i32 / i16) * DS_RAW_TO_C_MUL, precision);
+        client.print(((float) accTemp / accTempCount) * DS_RAW_TO_C_MUL, precision);
         client.print(",\"sorted\":");
         if (pageSwitch & PAGE_SWITCH_SORT_SENSORS){
           client.print("true");
@@ -969,9 +1151,9 @@ void loop() {
           client.print("false");
         }
         client.print(",\"acc\":");
-        client.print(i32);
+        client.print(accTemp);
         client.print(",\"div\":");
-        client.print(i16);
+        client.print(accTempCount);
         client.print(",\"history\":");
         client.print(historySize);
         client.print(",\"used\":\"");
@@ -1006,7 +1188,16 @@ void loop() {
     } // JSON
 
     if (serv & SERV_SENSOR_ERRORS){
-      if (!(serv & SERV_TEXT)){
+      if (serv & SERV_TEXT){
+        client.print("boot: ");
+        client.println(bootCount);
+        client.print("cycle: ");
+        client.println(dsCycleCount);
+        client.print("conn_err: ");
+        client.print(dsConnectionErrorCount);
+        client.print(" stored_conn_err: ");
+        client.println(eepromU32Get(EEPROM_CONNECTION_ERROR_COUNT, 0));
+      } else {
         client.print("\"sensors\":{");        
       }
       pageSwitch |= PAGE_SWITCH_FIRST_ITERATION;
@@ -1014,12 +1205,12 @@ void loop() {
         if (bit_is_clear(sensors, jjj)){
           continue;
         }
-        aaa = EEPROM_ERROR_COUNT + (jjj * 4);
-        EEPROM.get(aaa, ui16);
         if (serv & SERV_TEXT){
           client.print("i");
           client.print(jjj);
           client.print(" err:");
+          client.print(dsErrorCount[jjj]);
+          client.print(" stored_err:");          
         } else {
           if (pageSwitch & PAGE_SWITCH_FIRST_ITERATION){
             pageSwitch &= ~PAGE_SWITCH_FIRST_ITERATION;
@@ -1028,19 +1219,22 @@ void loop() {
           }
           client.print("\"i");
           client.print(jjj);
-          client.print("\":{\"err\":");        
+          client.print("\":{\"err\":");
+          client.print(dsErrorCount[jjj]);
+          client.print(",\"stored_err\":");                 
         }
-        client.print(ui16);
-        aaa = EEPROM_FAIL_COUNT + (jjj * 4);
-        EEPROM.get(aaa, ui16);
+        client.print(eepromU32Get(EEPROM_DATA_ERROR_COUNT, jjj));
         if (serv & SERV_TEXT){
-          client.print(" fail:");
-          client.println(ui16);
+          client.print(" stored_fail:");
         } else {
-          client.print(",\"fail\":");
-          client.print(ui16);
-          client.print("}");      
-        }    
+          client.print(",\"stored_fail\":");        
+        }
+        client.print(eepromU32Get(EEPROM_DATA_FAIL_COUNT, jjj));
+        if (serv & SERV_TEXT){
+          client.println();
+        } else {
+          client.print("}");          
+        }   
       }
       if (!(serv & SERV_TEXT)){
         client.print("}}");
@@ -1080,9 +1274,9 @@ void loop() {
         if (bit_is_clear(sensors, dsSort[iii])){
           continue;
         }
-        i16 = dsBufferedTemp[dsSort[iii]];
+        rawTemp = dsBufferedTemp[dsSort[iii]];
         if (serv & SERV_TEXT){
-          client.print((float) i16 * DS_RAW_TO_C_MUL, precision); 
+          client.print((float) rawTemp * DS_RAW_TO_C_MUL, precision); 
           client.print(" ");          
         } else {
           if (pageSwitch & PAGE_SWITCH_FIRST_ITERATION){
@@ -1099,7 +1293,7 @@ void loop() {
             client.print(",");            
           }
           client.print("\"temp\":");
-          client.print((float) i16 * DS_RAW_TO_C_MUL, precision); 
+          client.print((float) rawTemp * DS_RAW_TO_C_MUL, precision); 
           client.print(",\"buff\":[");
         }
         readBuffIndex = dsBuffIndex;
@@ -1134,16 +1328,16 @@ void loop() {
           } else {
             if (bit_is_set(dsBuffChange[readBuffIndex], dsSort[iii])){
               if (bit_is_set(dsBuffAmount[readBuffIndex], dsSort[iii])){
-                i16 -= DS_FILTER_ADAPT_STEP;
+                rawTemp -= DS_FILTER_ADAPT_STEP;
               } else {
-                i16 += DS_FILTER_ADAPT_STEP;
+                rawTemp += DS_FILTER_ADAPT_STEP;
               }
             }
             if (serv & SERV_TEXT){
-              client.print((float) i16 * DS_RAW_TO_C_MUL, precision);
+              client.print((float) rawTemp * DS_RAW_TO_C_MUL, precision);
               client.print(" ");              
             } else {
-              client.print((float) i16 * DS_RAW_TO_C_MUL, precision);
+              client.print((float) rawTemp * DS_RAW_TO_C_MUL, precision);
             }
           }
           if (!readBuffIndex){
