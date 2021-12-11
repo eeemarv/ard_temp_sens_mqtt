@@ -11,13 +11,15 @@
 #define DS_READ_TEST
 
 #define EEPROM_BOOT_COUNT 0x00
-//#define SET_BOOT_COUNT 0
+#define SET_BOOT_COUNT 0
 #define EEPROM_CONNECTION_ERROR_COUNT 0x04
-//#define SET_CONNECTION_ERROR_COUNT 0
+#define SET_CONNECTION_ERROR_COUNT 0
+#define EEPROM_STORED_CYCLE_COUNT 0x08
+#define SET_STORED_CYCLE_COUNT 0
 #define EEPROM_DATA_ERROR_COUNT 0x20
-//#define SET_DATA_ERROR_COUNT 0
+#define SET_DATA_ERROR_COUNT 0
 #define EEPROM_DATA_FAIL_COUNT 0x40
-//#define SET_DATA_FAIL_COUNT 0
+#define SET_DATA_FAIL_COUNT 0
 
 #define DS_BUFF_SIZE 128
 #define DS_TEMP_LSB 0
@@ -94,7 +96,7 @@
 #define ACC_RESET 0
 
 #define PWM_PD PD3
-#define PWM_LEVEL 15
+#define PWM_LEVEL 60
 
 #define ONE_WIRE_PRE_RESET_STABILIZE_TIME 10
 #define ONE_WIRE_RESET_PULSE_TIME 490
@@ -125,7 +127,7 @@
 #define TEST_TIME_HIGH ONE_WIRE_PORT |= TEST_TIME_BITMASK;
 #define TEST_TIME_RELEASE ONE_WIRE_DDR &= ~TEST_TIME_BITMASK;
 #define TEST_TIME_PULL ONE_WIRE_DDR |= TEST_TIME_BITMASK;
-#define TEST_TIME_PIN_ENABLE
+// #define TEST_TIME_PIN_ENABLE
 
 #define DS_SEARCH_ROM_COMMAND 0xf0
 #define DS_READ_ROM_COMMAND 0x33
@@ -178,6 +180,7 @@ Watchdog watchdog;
 uint32_t dsLastRequest = 0;
 uint16_t dsInterval = DS_INIT_TIME;
 uint32_t dsCycleCount = 0;
+uint16_t dsStoredCycleCount = 0;
 uint8_t dsRetryCount = 0;
 uint8_t dsStatus = DS_REQUEST;
 
@@ -449,7 +452,8 @@ void setup() {
   TCCR2B = (TCCR2B & 0xf0) | 0x01; // PWM freq 31kHz+
   DDRD &= B00111111; // PD7 & PD6 as input for comparator
   PORTD &= B00111111; // PD7 & PD6 no pull ups
-  ADCSRB &= ~(1 << ACME); // disable MUX analog inputs for analog comparator.
+  ADCSRB = 0x00; // disable MUX analog inputs for analog comparator.
+  DIDR1 = 0x00; // disable PD7 & PD6 digital inputs
   ACSR = 0x00; // analog comparator enable, no interrupts, no capture
   delay(500);
   ONE_WIRE_HIGH;  
@@ -543,6 +547,15 @@ void setup() {
   Serial.print("error ");
   Serial.print("count to ");
   Serial.println(SET_CONNECTION_ERROR_COUNT);
+  #endif
+#endif 
+
+#ifdef SET_STORED_CYCLE_COUNT
+  eepromU32Put(EEPROM_STORED_CYCLE_COUNT, 0, SET_STORED_CYCLE_COUNT);
+  #ifdef SERIAL_EN
+  Serial.print("Set stored cycle ");
+  Serial.print("count to ");
+  Serial.println(SET_STORED_CYCLE_COUNT);
   #endif
 #endif 
 
@@ -663,6 +676,11 @@ void loop() {
         dsCycleCount++;        
         dsIndex = 0;
         dsBuffIndex++;
+
+        dsStoredCycleCount++;
+        if (!dsStoredCycleCount){
+          eepromU32Inc(EEPROM_STORED_CYCLE_COUNT, 0);
+        }
 
         if (dsBuffIndex >= DS_BUFF_SIZE){
           dsBuffIndex = 0;
@@ -1072,6 +1090,8 @@ void loop() {
       client.print(bootCount);
       client.print(",\"cycle\":");
       client.print(dsCycleCount);
+      client.print(",\"stored_cycle\":");
+      client.print(eepromU32Get(EEPROM_STORED_CYCLE_COUNT, 0));
       client.print(",\"conn_err\":");
       client.print(dsConnectionErrorCount);
       client.print(",\"stored_conn_err\":");
@@ -1166,7 +1186,9 @@ void loop() {
         client.print("boot: ");
         client.println(bootCount);
         client.print("cycle: ");
-        client.println(dsCycleCount);
+        client.print(dsCycleCount);
+        client.print(" stored_cycle: ");
+        client.println(eepromU32Get(EEPROM_STORED_CYCLE_COUNT, 0));
         client.print("conn_err: ");
         client.print(dsConnectionErrorCount);
         client.print(" stored_conn_err: ");
