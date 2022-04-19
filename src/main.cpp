@@ -3,6 +3,7 @@
 #include <EEPROM.h>
 #include <EthernetENC.h>
 #include <Watchdog.h>
+#include <.env.h>
 
 #define ETHERNET_SELECT_PIN 10
 #define SERIAL_BAUD 115200
@@ -11,15 +12,15 @@
 #define DS_READ_TEST
 
 #define EEPROM_BOOT_COUNT 0x00
-#define SET_BOOT_COUNT 0
+// #define SET_BOOT_COUNT 0
 #define EEPROM_CONNECTION_ERROR_COUNT 0x04
-#define SET_CONNECTION_ERROR_COUNT 0
+// #define SET_CONNECTION_ERROR_COUNT 0
 #define EEPROM_STORED_CYCLE_COUNT 0x08
-#define SET_STORED_CYCLE_COUNT 0
+// #define SET_STORED_CYCLE_COUNT 0
 #define EEPROM_DATA_ERROR_COUNT 0x20
-#define SET_DATA_ERROR_COUNT 0
+// #define SET_DATA_ERROR_COUNT 0
 #define EEPROM_DATA_FAIL_COUNT 0x40
-#define SET_DATA_FAIL_COUNT 0
+// #define SET_DATA_FAIL_COUNT 0
 
 #define DS_BUFF_SIZE 128
 #define DS_TEMP_LSB 0
@@ -171,8 +172,8 @@ inline static void nops(){
 template<> inline void nops<0>(){};
 
 const byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
-// const IPAddress ip(10, 200, 125, 80);
-const IPAddress ip(192, 168, 1, 180);
+const IPAddress ip(10, 200, 125, 80);
+// const IPAddress ip(192, 168, 1, 180);
 EthernetServer server(80);
 
 Watchdog watchdog;
