@@ -1,4 +1,5 @@
-# Arduino nano, DS18B20 temperature sensors server with ENC28J60 on local network
+# Arduino nano, DS18B20 temperature sensors over long wire, ENC28J60 ethernet, publish to local MQTT broker
 
-Developed with [platformio](https://platformio.org/) for measuring the temperature of a swimming pool (slow changing temperatures). This is done with 8 [ds18b20](https://datasheets.maximintegrated.com/en/ds/DS18B20.pdf) temperature sensors over one onewire line. The [Arduino nano](https://store.arduino.cc/products/arduino-nano) serves the temperature results with a [ENC28J60 shield](https://www.microchip.com/en-us/product/ENC28J60) . Approximately every second one sensor does a measurement continuously. The measurements are all stored in a 128 step buffer (128 steps for each sensor, so it spans approximately 15 minutes).You can query the server for an avaraged result calculated from the buffer in various ways.
-
+Developed on [platformio](https://platformio.org/) 
+Up to 8 [ds18b20](https://datasheets.maximintegrated.com/en/ds/DS18B20.pdf) temperature sensors over one onewire line (up to 300m long). 
+Average of selected meridian values in Celsius from the sensors is published to a local MQTT broker.
