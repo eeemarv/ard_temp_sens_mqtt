@@ -1,5 +1,8 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include <avr/sleep.h>
+#include <avr/interrupt.h>
+#include <EEPROM.h>
 #include <PubSubClient.h>
 #include <EthernetENC.h>
 #include <Watchdog.h>
@@ -107,10 +110,22 @@ typedef uint8_t DsScratchPad[DS_SCRATCHPAD_SIZE];
 
 #define CYCLES_MICROSEC (F_CPU / 1000000)
 
-#define DS_NEXT(DS_STATUS, DS_INTERVAL)\        
-  dsStatus = DS_STATUS;\
-  dsInterval = DS_INTERVAL;\
-  dsLastRequest = millis();\
+#ifndef DS_ADDRESSES
+  #define DS_ADDRESSES \
+    0x28, 0x18, 0x39, 0x15, 0x12, 0x21, 0x01, 0x74, \
+    0x28, 0xDC, 0x17, 0xCA, 0x11, 0x21, 0x01, 0x12, \
+    0x28, 0x22, 0x0C, 0x11, 0x12, 0x21, 0x01, 0x0E, \
+    0x28, 0x32, 0xDB, 0x09, 0x12, 0x21, 0x01, 0x7E, \
+    0x28, 0xF1, 0x3F, 0x00, 0x12, 0x21, 0x01, 0xEE, \
+    0x28, 0xB9, 0xC1, 0x10, 0x12, 0x21, 0x01, 0x06, \
+    0x28, 0xAD, 0x0A, 0xBA, 0x11, 0x21, 0x01, 0x85, \
+    0x28, 0x2B, 0x9F, 0x04, 0x12, 0x21, 0x01, 0xD8
+#endif
+
+#define DS_NEXT(DS_STATUS, DS_INTERVAL) \
+  dsStatus = DS_STATUS; \
+  dsInterval = DS_INTERVAL; \
+  dsLastRequest = millis(); \
   return;
 
 // See https://stackoverflow.com/a/63468969
@@ -141,21 +156,18 @@ uint8_t dsIndex = DS_INDEX_INIT;
 bool dsReady = false;
 bool dsError = false;
 int16_t dsTemp[DS_DEVICE_COUNT];
-int16_t workAry[DS_DEVICE_COUNT];
 uint8_t dsSort[DS_DEVICE_COUNT];
 DsScratchPad dsScratchPad;
+
+uint8_t oneWireRom[8];
+uint8_t oneWireSearchCrc8;
+uint8_t oneWireSearchLastDisc;
+bool oneWireSearchLastDeviceFlag;
 
 const uint8_t* adr;
 
 const PROGMEM uint8_t dsProgMemAddr[] = {
-  0x28, 0x18, 0x39, 0x15, 0x12, 0x21, 0x01, 0x74,
-  0x28, 0xDC, 0x17, 0xCA, 0x11, 0x21, 0x01, 0x12,
-  0x28, 0x22, 0x0C, 0x11, 0x12, 0x21, 0x01, 0x0E,
-  0x28, 0x32, 0xDB, 0x09, 0x12, 0x21, 0x01, 0x7E,
-  0x28, 0xF1, 0x3F, 0x00, 0x12, 0x21, 0x01, 0xEE,
-  0x28, 0xB9, 0xC1, 0x10, 0x12, 0x21, 0x01, 0x06,
-  0x28, 0xAD, 0x0A, 0xBA, 0x11, 0x21, 0x01, 0x85,
-  0x28, 0x2B, 0x9F, 0x04, 0x12, 0x21, 0x01, 0xD8
+  DS_ADDRESSES
 };
 
 // Dow-CRC using polynomial X^8 + X^5 + X^4 + X^0
@@ -169,7 +181,12 @@ static const uint8_t PROGMEM dscrc2x16_table[] = {
 	0x8C, 0x11, 0xAF, 0x32, 0xCA, 0x57, 0xE9, 0x74
 };
 
-inline uint8_t oneWireReset(){
+inline uint8_t oneWireCrc8(uint8_t crc){
+  return pgm_read_byte(dscrc2x16_table + (crc & 0x0f)) ^
+    pgm_read_byte(dscrc2x16_table + 16 + ((crc >> 4) & 0x0f));  
+}
+
+inline bool oneWireReset(){
 	uint8_t retryCount = 200;
   uint8_t releaseTime;
 
@@ -205,7 +222,7 @@ inline uint8_t oneWireReset(){
     ONE_WIRE_PULL;
     interrupts();
     delayMicroseconds(240 + ONE_WIRE_IDLE_TIME);
-    return 0; // no ds response
+    return false; // no ds response
   }
   delayMicroseconds(240);
   for (releaseTime = ONE_WIRE_RESET_RELEASE_TIME; releaseTime; releaseTime--){
@@ -221,71 +238,84 @@ inline uint8_t oneWireReset(){
     delayMicroseconds(releaseTime);
   }
   delayMicroseconds(ONE_WIRE_IDLE_TIME);
-  return 1;
+  return true;
 }
 
-inline void oneWireWrite(uint8_t v){
-  uint8_t bitMask = 0x01;
+inline void oneWireWriteBit(bool b){
   // slot 90µs + idle 20µs
-  for(bitMask = 0x01; bitMask; bitMask <<= 1){
-    noInterrupts();
-    ONE_WIRE_LOW;
-    ONE_WIRE_PULL;
-    if (v & bitMask){
-      nops<CYCLES_MICROSEC * ONE_WIRE_WRITE_INIT_TIME>();     
-      ONE_WIRE_HIGH;
-      interrupts();
-      delayMicroseconds(ONE_WIRE_WRITE_ONE_TIME + ONE_WIRE_IDLE_TIME);
-      continue;
-    }
-    delayMicroseconds(ONE_WIRE_WRITE_INIT_TIME + ONE_WIRE_WRITE_ZERO_TIME);
+  noInterrupts();
+  ONE_WIRE_LOW;
+  ONE_WIRE_PULL;
+  if (b){
+    nops<CYCLES_MICROSEC * ONE_WIRE_WRITE_INIT_TIME>();     
     ONE_WIRE_HIGH;
     interrupts();
-    delayMicroseconds(ONE_WIRE_IDLE_TIME);      
+    delayMicroseconds(ONE_WIRE_WRITE_ONE_TIME + ONE_WIRE_IDLE_TIME);
+    return;
+  }
+  delayMicroseconds(ONE_WIRE_WRITE_INIT_TIME + ONE_WIRE_WRITE_ZERO_TIME);
+  ONE_WIRE_HIGH;
+  interrupts();
+  delayMicroseconds(ONE_WIRE_IDLE_TIME); 
+}
+
+inline void oneWireWriteByte(uint8_t v){
+  uint8_t bitMask = 0x01;
+  for(bitMask = 0x01; bitMask; bitMask <<= 1){
+    oneWireWriteBit(v & bitMask);
   }
 }
 
-inline uint8_t oneWireRead(){
-  uint8_t bitMask;
-  uint8_t v = 0x00;
+inline bool oneWireReadBit(){
+  bool b = false;
   uint8_t releaseTime;
 
-  for (bitMask = 0x01; bitMask; bitMask <<= 1){
-    noInterrupts();
-    ONE_WIRE_LOW;
-    ONE_WIRE_PULL;
+  noInterrupts();
+  ONE_WIRE_LOW;
+  ONE_WIRE_PULL;
 #ifdef TEST_TIME_PIN_ENABLE
-    TEST_TIME_HIGH;
+  TEST_TIME_HIGH;
 #endif
-    nops<CYCLES_MICROSEC * ONE_WIRE_READ_INIT_TIME>(); 
-    ONE_WIRE_RELEASE;
-    ONE_WIRE_HIGH;
+  nops<CYCLES_MICROSEC * ONE_WIRE_READ_INIT_TIME>(); 
+  ONE_WIRE_RELEASE;
+  ONE_WIRE_HIGH;
 #ifdef TEST_TIME_PIN_ENABLE
-    TEST_TIME_LOW;
+  TEST_TIME_LOW;
 #endif 
-    nops<(CYCLES_MICROSEC * ONE_WIRE_READ_SAMPLE_TIME) - 4>();
+  nops<(CYCLES_MICROSEC * ONE_WIRE_READ_SAMPLE_TIME) - 4>();
 #ifdef TEST_TIME_PIN_ENABLE
-    TEST_TIME_HIGH;
+  TEST_TIME_HIGH;
 #endif 
-    if (ONE_WIRE_SAMPLE){
-      v |= bitMask;
-      ONE_WIRE_PULL;
-    }
-    for (releaseTime = ONE_WIRE_READ_RELEASE_TIME; releaseTime; releaseTime--){
-      if (ONE_WIRE_SAMPLE){
-        break;
-      }
-      nops<(CYCLES_MICROSEC * 1) - 4>();      
-    }
+  if (ONE_WIRE_SAMPLE){
+    b = true;
     ONE_WIRE_PULL;
-    interrupts();
-    if (releaseTime){
-      delayMicroseconds(releaseTime);      
+  }
+  for (releaseTime = ONE_WIRE_READ_RELEASE_TIME; releaseTime; releaseTime--){
+    if (ONE_WIRE_SAMPLE){
+      break;
     }
+    nops<(CYCLES_MICROSEC * 1) - 4>();      
+  }
+  ONE_WIRE_PULL;
+  interrupts();
+  if (releaseTime){
+    delayMicroseconds(releaseTime);      
+  }
 #ifdef TEST_TIME_PIN_ENABLE
-    TEST_TIME_LOW;
+  TEST_TIME_LOW;
 #endif 
-    delayMicroseconds(ONE_WIRE_IDLE_TIME);
+  delayMicroseconds(ONE_WIRE_IDLE_TIME);
+  return b;
+}
+
+inline uint8_t oneWireReadByte(){
+  uint8_t bitMask;
+  uint8_t v = 0x00;
+
+  for (bitMask = 0x01; bitMask; bitMask <<= 1){
+    if (oneWireReadBit()){
+      v |= bitMask;
+    }
   }
   return v;
 }
@@ -294,36 +324,125 @@ inline void oneWireRomSelect(){
   uint8_t i;
   const uint8_t* adr;
 
-  oneWireWrite(DS_MATCH_ROM_COMMAND);
+  oneWireWriteByte(DS_MATCH_ROM_COMMAND);
   adr = dsProgMemAddr + (dsIndex * DS_ADDRESS_SIZE);
   for (i = 0; i < DS_ADDRESS_SIZE; i++){
-    oneWireWrite(pgm_read_byte_near(adr + i));
+    oneWireWriteByte(pgm_read_byte_near(adr + i));
   }
 }
 
-inline uint8_t oneWireReadDsScratchPath(){
+inline bool oneWireReadDsScratchPath(){
   uint8_t i;
-  uint8_t crc = 0;
+  uint8_t crc8 = 0;
 
-  oneWireWrite(DS_READ_SCRATCHPAD_COMMAND);
+  oneWireWriteByte(DS_READ_SCRATCHPAD_COMMAND);
   for (i = 0; i < DS_SCRATCHPAD_SIZE; i++){
-    dsScratchPad[i] = oneWireRead();
+    dsScratchPad[i] = oneWireReadByte();
   }
   for (i = 0; i < DS_SCRATCHPAD_SIZE; i++){
 		if (dsScratchPad[i] != 0) {
 			break;
 		}
-    return 0;
+    return false;
 	}
   for(i = 0; i < DS_SCRATCHPAD_SIZE - 1; i++){
-    crc ^= dsScratchPad[i];
-		crc = pgm_read_byte(dscrc2x16_table + (crc & 0x0f)) ^
-		  pgm_read_byte(dscrc2x16_table + 16 + ((crc >> 4) & 0x0f));
+    crc8 ^= dsScratchPad[i];
+    crc8 = oneWireCrc8(crc8);
   }
-  if (crc == dsScratchPad[DS_SCRATCHPAD_CRC]){
-    return 1;
+  if (crc8 == dsScratchPad[DS_SCRATCHPAD_CRC]){
+    return true;
   }
-  return 0;
+  return false;
+}
+
+// See Maxim/Dallas One wire "Application Note 187"
+void oneWireSearchRomReset(){
+  oneWireSearchLastDisc = 0;
+  oneWireSearchLastDeviceFlag = false;
+}
+
+bool oneWireSearchRom(){
+  bool readBit;
+  bool readBitCmp;
+  bool writeBit;  
+  uint8_t romBitIndex = 1;
+  uint8_t romByteIndex = 0;
+  uint8_t romByteMask = 0x01;   
+  uint8_t lastZero = 0;
+  uint8_t crc8 = 0;
+
+  if (oneWireSearchLastDeviceFlag){
+    return false;
+  }
+
+  if (!oneWireReset()){
+    return false;
+  }
+
+  // search command 
+  oneWireWriteByte(0xF0);
+
+  do {
+    readBit = oneWireReadBit();
+    readBitCmp = oneWireReadBit();
+
+    // check for no devices on 1-wire
+    if (readBit && readBitCmp){
+      return false;       
+    } else {
+      if (readBit != readBitCmp){
+        writeBit = readBit;       
+      } else {
+        // if this discrepancy if before the Last Discrepancy
+        // on a previous next then pick the same as last time
+        if (romBitIndex < oneWireSearchLastDisc){
+          writeBit = ((oneWireRom[romByteIndex] & romByteMask) > 0);            
+        } else {
+          // if equal to last pick 1, if not then pick 0
+          writeBit = (romBitIndex == oneWireSearchLastDisc);            
+        }
+        // if 0 was picked then record its position in LastZero
+        if (!writeBit){
+          lastZero = romBitIndex;
+        }
+      }
+    }
+
+    if (writeBit){
+      oneWireRom[romByteIndex] |= romByteMask;          
+    } else {
+      oneWireRom[romByteIndex] &= ~romByteMask;          
+    }
+
+    oneWireWriteBit(writeBit);
+
+    romBitIndex++;
+    romByteMask <<= 1;
+
+    if (romByteMask == 0){
+      crc8 ^= oneWireRom[romByteIndex];
+      crc8 = oneWireCrc8(crc8);
+      romByteIndex++;
+      romByteMask = 0x01;
+      Serial.print(oneWireRom[romByteIndex], HEX);
+      Serial.print(" ");      
+    }
+
+  } while (romByteIndex < 8);
+
+  if (crc8 != 0){
+    return false;
+  }
+
+  oneWireSearchLastDisc = lastZero;
+
+  if (oneWireSearchLastDisc == 0){
+    oneWireSearchLastDeviceFlag = true;          
+  }
+
+  Serial.println();
+
+  return true;
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
@@ -384,6 +503,12 @@ bool publishTemp(String topic) {
   return mqttClient.publish(topic.c_str(), temp.c_str());
 }
 
+void stop(){
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+  cli();
+  sleep_mode();
+}
+
 void setup() {
   delay(500);
   DDRD |= 1 << PWM_PD; // set to output
@@ -412,6 +537,15 @@ void setup() {
   }
 
   delay(250);
+
+  Serial.println("Search ROM");
+
+  oneWireSearchRomReset();
+
+  while (oneWireSearchRom()){
+  }
+
+  stop();
   
   // set temperature resolution to 12 bit
   for (dsIndex = 0; dsIndex < DS_DEVICE_COUNT; dsIndex++){
@@ -422,14 +556,14 @@ void setup() {
     }
     oneWireReset();
     oneWireRomSelect();
-    oneWireWrite(DS_WRITE_SCRATCHPAD_COMMAND);
-    oneWireWrite(dsScratchPad[DS_SCRATCHPAD_REG_TH]);
-    oneWireWrite(dsScratchPad[DS_SCRATCHPAD_REG_TL]);
-    oneWireWrite(DS_CONFIG_12_BIT);
+    oneWireWriteByte(DS_WRITE_SCRATCHPAD_COMMAND);
+    oneWireWriteByte(dsScratchPad[DS_SCRATCHPAD_REG_TH]);
+    oneWireWriteByte(dsScratchPad[DS_SCRATCHPAD_REG_TL]);
+    oneWireWriteByte(DS_CONFIG_12_BIT);
     delay(10);
     oneWireReset();
     oneWireRomSelect();
-    oneWireWrite(DS_COPY_SCRATCHPAD_COMMAND);
+    oneWireWriteByte(DS_COPY_SCRATCHPAD_COMMAND);
     delay(25);
   }
   dsIndex = DS_INDEX_INIT;
@@ -558,7 +692,7 @@ void loop() {
       }
 
       oneWireRomSelect();
-      oneWireWrite(DS_CONVERT_TEMP_COMMAND);
+      oneWireWriteByte(DS_CONVERT_TEMP_COMMAND);
 
       if (dsRetryCount){
         Serial.print("REQ");
