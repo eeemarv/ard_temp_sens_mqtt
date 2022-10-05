@@ -34,9 +34,8 @@
 #define DS_RETRY_AFTER_CONNECTION_ERROR_TIME 1000
 
 #define DS_INDEX_INIT 0
-#define DS_DEVICE_COUNT 8
+#define DS_MAX_DEVICE_COUNT 8
 #define DS_DEVICE_SORT_SELECT B00011000
-#define DS_ADDRESS_SIZE 8
 
 #define DS_REQUEST 0x01
 #define DS_READ 0x02
@@ -72,6 +71,13 @@
 #define ONE_WIRE_PULL ONE_WIRE_DDR |= ONE_WIRE_BITMASK;
 #define ACO_BITMASK B00100000
 #define ONE_WIRE_SAMPLE (ACSR & ACO_BITMASK)  // comparator output
+#define ONE_WIRE_ADDRESS_BIT_SIZE 64
+#define ONE_WIRE_ADDRESS_BYTE_SIZE 8
+
+#define PREV_DISC_BIT_POS_INIT -1
+#define PREV_DISC_BIT_POS_END -1
+#define EEPROM_DS_DEVICE_COUNT 0x00
+#define EEPROM_DS_DEVICE_ADDRESSES 0x01
 
 // test timings on oscilloscope
 #define TEST_TIME_BITMASK B00100000 // PD5
@@ -110,23 +116,18 @@ typedef uint8_t DsScratchPad[DS_SCRATCHPAD_SIZE];
 
 #define CYCLES_MICROSEC (F_CPU / 1000000)
 
-#ifndef DS_ADDRESSES
-  #define DS_ADDRESSES \
-    0x28, 0x18, 0x39, 0x15, 0x12, 0x21, 0x01, 0x74, \
-    0x28, 0xDC, 0x17, 0xCA, 0x11, 0x21, 0x01, 0x12, \
-    0x28, 0x22, 0x0C, 0x11, 0x12, 0x21, 0x01, 0x0E, \
-    0x28, 0x32, 0xDB, 0x09, 0x12, 0x21, 0x01, 0x7E, \
-    0x28, 0xF1, 0x3F, 0x00, 0x12, 0x21, 0x01, 0xEE, \
-    0x28, 0xB9, 0xC1, 0x10, 0x12, 0x21, 0x01, 0x06, \
-    0x28, 0xAD, 0x0A, 0xBA, 0x11, 0x21, 0x01, 0x85, \
-    0x28, 0x2B, 0x9F, 0x04, 0x12, 0x21, 0x01, 0xD8
-#endif
-
 #define DS_NEXT(DS_STATUS, DS_INTERVAL) \
   dsStatus = DS_STATUS; \
   dsInterval = DS_INTERVAL; \
   dsLastRequest = millis(); \
   return;
+
+#define SERIAL_PRINT_HEX(N) \
+  if (N < 16){ \
+    Serial.print("0"); \
+  } \
+  Serial.print(N, HEX); \
+  Serial.print(" ");
 
 // See https://stackoverflow.com/a/63468969
 template< unsigned N > 
@@ -153,22 +154,18 @@ uint16_t dsInterval = DS_INIT_TIME;
 uint8_t dsRetryCount = 0;
 uint8_t dsStatus = DS_REQUEST;
 uint8_t dsIndex = DS_INDEX_INIT;
+uint8_t dsDeviceCount;
+int8_t prevDiscBitPos = -1;
 bool dsReady = false;
 bool dsError = false;
-int16_t dsTemp[DS_DEVICE_COUNT];
-uint8_t dsSort[DS_DEVICE_COUNT];
+int16_t dsTemp[DS_MAX_DEVICE_COUNT];
+uint8_t dsSort[DS_MAX_DEVICE_COUNT];
 DsScratchPad dsScratchPad;
 
-uint8_t oneWireRom[8];
-uint8_t oneWireSearchCrc8;
-uint8_t oneWireSearchLastDisc;
-bool oneWireSearchLastDeviceFlag;
+uint8_t mqttConnectAttempts0 = 0;
+uint8_t mqttConnectAttempts1 = 0;
 
 const uint8_t* adr;
-
-const PROGMEM uint8_t dsProgMemAddr[] = {
-  DS_ADDRESSES
-};
 
 // Dow-CRC using polynomial X^8 + X^5 + X^4 + X^0
 // Tiny 2x16 entry CRC table created by Arjen Lentz
@@ -186,6 +183,19 @@ inline uint8_t oneWireCrc8(uint8_t crc){
     pgm_read_byte(dscrc2x16_table + 16 + ((crc >> 4) & 0x0f));  
 }
 
+/**
+ * @brief put in endless loop to trigger Watchdog.
+ */
+void stop(){
+  while(true){
+    delay(100);
+  }
+}
+
+/**
+ * @return true Devices found
+ * @return false No devices found
+ */
 inline bool oneWireReset(){
 	uint8_t retryCount = 200;
   uint8_t releaseTime;
@@ -320,14 +330,17 @@ inline uint8_t oneWireReadByte(){
   return v;
 }
 
+/**
+ * @brief select ROM based on dsIndex.
+ * ROM device address is read from EEPROM.
+ */
 inline void oneWireRomSelect(){
-  uint8_t i;
-  const uint8_t* adr;
+  uint8_t eepromaAdrStart = EEPROM_DS_DEVICE_ADDRESSES + (dsIndex * ONE_WIRE_ADDRESS_BYTE_SIZE);
 
   oneWireWriteByte(DS_MATCH_ROM_COMMAND);
-  adr = dsProgMemAddr + (dsIndex * DS_ADDRESS_SIZE);
-  for (i = 0; i < DS_ADDRESS_SIZE; i++){
-    oneWireWriteByte(pgm_read_byte_near(adr + i));
+
+  for (uint8_t jjj = 0; jjj < ONE_WIRE_ADDRESS_BYTE_SIZE; jjj++){
+    oneWireWriteByte(EEPROM.read(eepromaAdrStart + jjj));
   }
 }
 
@@ -355,94 +368,141 @@ inline bool oneWireReadDsScratchPath(){
   return false;
 }
 
-// See Maxim/Dallas One wire "Application Note 187"
-void oneWireSearchRomReset(){
-  oneWireSearchLastDisc = 0;
-  oneWireSearchLastDeviceFlag = false;
-}
-
-bool oneWireSearchRom(){
+/**
+ * @brief Searches ROM address of devices and updates in EEPROM,
+ * start with global vars dsIndex = 0 and prevDiscBitPos = -1,
+ * when prevDiscBitPos is -1 on return, the search is finished.
+ * Note 1: increase dsIndex after call.
+ * Note 2: no crc8-verification performed yet.
+ * See Maxim/Dallas One wire "Application Note 187"
+ * @return true ROM address updated in EEPROM, dsIndex increased
+ * @return false Error occured 
+ */
+inline bool oneWireSearchRomOneAddr(){
+  uint8_t bitPos;
+  int8_t prevDiscZeroBitPos = -1;
   bool readBit;
-  bool readBitCmp;
-  bool writeBit;  
-  uint8_t romBitIndex = 1;
-  uint8_t romByteIndex = 0;
-  uint8_t romByteMask = 0x01;   
-  uint8_t lastZero = 0;
-  uint8_t crc8 = 0;
-
-  if (oneWireSearchLastDeviceFlag){
-    return false;
-  }
+  bool readBitComp;
+  uint8_t prevRomByte;
+  uint8_t curRomByte;
+  uint8_t eepromCurRomByteIndex;
 
   if (!oneWireReset()){
+    Serial.println("No devices found on reset.");
     return false;
   }
 
-  // search command 
-  oneWireWriteByte(0xF0);
+  oneWireWriteByte(DS_SEARCH_ROM_COMMAND);
 
-  do {
-    readBit = oneWireReadBit();
-    readBitCmp = oneWireReadBit();
+  Serial.print("adr.");
+  Serial.print(dsIndex, HEX);
+  Serial.print(": ");
 
-    // check for no devices on 1-wire
-    if (readBit && readBitCmp){
-      return false;       
-    } else {
-      if (readBit != readBitCmp){
-        writeBit = readBit;       
-      } else {
-        // if this discrepancy if before the Last Discrepancy
-        // on a previous next then pick the same as last time
-        if (romBitIndex < oneWireSearchLastDisc){
-          writeBit = ((oneWireRom[romByteIndex] & romByteMask) > 0);            
-        } else {
-          // if equal to last pick 1, if not then pick 0
-          writeBit = (romBitIndex == oneWireSearchLastDisc);            
-        }
-        // if 0 was picked then record its position in LastZero
-        if (!writeBit){
-          lastZero = romBitIndex;
-        }
+  for (bitPos = 0; bitPos < ONE_WIRE_ADDRESS_BIT_SIZE; bitPos++){
+    uint8_t romByteMask = 1 << (bitPos & 0x07);
+    uint8_t romByteId = bitPos >> 3;
+
+    if (romByteMask == 0x01){
+      if (bitPos){
+        SERIAL_PRINT_HEX(curRomByte);
+        EEPROM.update(eepromCurRomByteIndex, curRomByte);
+      }
+      eepromCurRomByteIndex = EEPROM_DS_DEVICE_ADDRESSES + (dsIndex * ONE_WIRE_ADDRESS_BYTE_SIZE) + romByteId;
+      curRomByte = 0x00;
+      if (dsIndex){
+        prevRomByte = EEPROM.read(eepromCurRomByteIndex - ONE_WIRE_ADDRESS_BYTE_SIZE);
       }
     }
 
-    if (writeBit){
-      oneWireRom[romByteIndex] |= romByteMask;          
-    } else {
-      oneWireRom[romByteIndex] &= ~romByteMask;          
+    readBit = oneWireReadBit();
+    readBitComp = oneWireReadBit();
+
+    if (readBit && readBitComp){
+      Serial.println("search ROM: no devices.");
+      return false;
     }
 
-    oneWireWriteBit(writeBit);
-
-    romBitIndex++;
-    romByteMask <<= 1;
-
-    if (romByteMask == 0){
-      crc8 ^= oneWireRom[romByteIndex];
-      crc8 = oneWireCrc8(crc8);
-      romByteIndex++;
-      romByteMask = 0x01;
-      Serial.print(oneWireRom[romByteIndex], HEX);
-      Serial.print(" ");      
+    if (readBit != readBitComp){
+      if (readBit){
+        curRomByte |= romByteMask;      
+      }
+      oneWireWriteBit(readBit);
+      continue;
     }
 
-  } while (romByteIndex < 8);
+    // bit discrepancy occurred
 
-  if (crc8 != 0){
-    return false;
+    if (bitPos < prevDiscBitPos){
+      if (dsIndex == 0){
+        Serial.println("Search error: discrepancy on dsIndex 0.");
+        return false;
+      }
+      if (romByteMask & prevRomByte){
+        oneWireWriteBit(true);
+        curRomByte |= romByteMask;
+        continue;
+      }
+      prevDiscZeroBitPos = bitPos;
+      oneWireWriteBit(false);
+      continue;
+    }
+
+    if (bitPos > prevDiscBitPos){
+      prevDiscZeroBitPos = bitPos;
+      prevDiscBitPos = bitPos;
+      oneWireWriteBit(false);
+      continue;
+    }
+
+    oneWireWriteBit(true);
+    curRomByte |= romByteMask;
   }
 
-  oneWireSearchLastDisc = lastZero;
-
-  if (oneWireSearchLastDisc == 0){
-    oneWireSearchLastDeviceFlag = true;          
-  }
-
-  Serial.println();
-
+  prevDiscBitPos = prevDiscZeroBitPos;
+  SERIAL_PRINT_HEX(curRomByte);
+  EEPROM.update(eepromCurRomByteIndex, curRomByte);
   return true;
+}
+
+/**
+ * @brief search addresses of all connected
+ * one wire devices and update in EEPROM and
+ * check CRC bytes.
+ */
+void oneWireSearchRomAllAddr(){
+  Serial.println();
+  Serial.println("Search ROM");
+  prevDiscBitPos = PREV_DISC_BIT_POS_INIT;
+
+  for (dsIndex = DS_INDEX_INIT; dsIndex < DS_MAX_DEVICE_COUNT; dsIndex++){
+    if (oneWireSearchRomOneAddr()){
+      // search succesful, check crc
+      uint8_t crc8 = 0x00;
+      for (uint8_t jjj; jjj < ONE_WIRE_ADDRESS_BYTE_SIZE; jjj++){
+        crc8 ^= EEPROM.read(jjj + EEPROM_DS_DEVICE_ADDRESSES + (dsIndex * ONE_WIRE_ADDRESS_BYTE_SIZE));
+        crc8 = oneWireCrc8(crc8);
+      }
+      if (crc8){
+        Serial.println("CRC error");
+        stop();
+      }
+      Serial.println("CRC ok");
+
+      if (prevDiscBitPos >= 0){
+        // search next
+        continue;
+      }
+      // last device found
+      dsDeviceCount = dsIndex + 1;
+      break;
+    }
+    Serial.print("error on search ROM");
+    stop();    
+  }
+  EEPROM.update(EEPROM_DS_DEVICE_COUNT, dsDeviceCount);
+  Serial.print("Device count:");
+  Serial.print(dsDeviceCount);
+  Serial.println();
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
@@ -474,11 +534,11 @@ bool publishTemp(String topic) {
   uint32_t accTemp = 0;
   uint8_t accTempDiv = 0;
 
-  for (jjj = 0; jjj < DS_DEVICE_COUNT; jjj++){
+  for (jjj = 0; jjj < dsDeviceCount; jjj++){
     dsSort[jjj] = jjj;
   }
 
-  for (jjj = 0; jjj < (DS_DEVICE_COUNT - 1); jjj++){
+  for (jjj = 0; jjj < (dsDeviceCount - 1); jjj++){
     if (dsTemp[dsSort[jjj]] > dsTemp[dsSort[jjj + 1]]){
       dsSort[jjj] ^= dsSort[jjj + 1];
       dsSort[jjj + 1] ^= dsSort[jjj];
@@ -486,7 +546,7 @@ bool publishTemp(String topic) {
     }
   }
 
-  for (jjj = 0; jjj < DS_DEVICE_COUNT; jjj++){
+  for (jjj = 0; jjj < dsDeviceCount; jjj++){
     if (DS_DEVICE_SORT_SELECT & jjj){
       continue;
       accTemp += dsTemp[dsSort[jjj]];
@@ -503,14 +563,8 @@ bool publishTemp(String topic) {
   return mqttClient.publish(topic.c_str(), temp.c_str());
 }
 
-void stop(){
-  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-  cli();
-  sleep_mode();
-}
-
 void setup() {
-  delay(500);
+  delay(250);
   DDRD |= 1 << PWM_PD; // set to output
   analogWrite(PWM_PD, PWM_LEVEL); // pinMode output is included in this
   TCCR2B = (TCCR2B & 0xf0) | 0x01; // PWM freq 31kHz+
@@ -537,21 +591,18 @@ void setup() {
   }
 
   delay(250);
+  watchdog.enable(Watchdog::TIMEOUT_4S);
 
-  Serial.println("Search ROM");
+  oneWireSearchRomAllAddr();
 
-  oneWireSearchRomReset();
-
-  while (oneWireSearchRom()){
-  }
-
-  stop();
-  
-  // set temperature resolution to 12 bit
-  for (dsIndex = 0; dsIndex < DS_DEVICE_COUNT; dsIndex++){
+  Serial.println("Set devices to 12bit mode");
+  for (dsIndex = 0; dsIndex < dsDeviceCount; dsIndex++){
     oneWireReadDsScratchPath();
+    Serial.print("adr.");
+    Serial.print(dsIndex, HEX);
+    Serial.print(": ");
     if (dsScratchPad[DS_SCRATCHPAD_CONFIG] == DS_CONFIG_12_BIT){
-      delay(10);
+      Serial.println("no update.");
       continue;
     }
     oneWireReset();
@@ -564,7 +615,8 @@ void setup() {
     oneWireReset();
     oneWireRomSelect();
     oneWireWriteByte(DS_COPY_SCRATCHPAD_COMMAND);
-    delay(25);
+    delay(50);
+    Serial.println("updated.");
   }
   dsIndex = DS_INDEX_INIT;
 
@@ -581,9 +633,7 @@ void setup() {
     Serial.println("Ethernet ok.");
   }
 
-  delay(500);
   dsLastRequest = millis();
-  watchdog.enable(Watchdog::TIMEOUT_4S);
 }
 
 void loop() {
@@ -591,6 +641,8 @@ void loop() {
   Ethernet.maintain();
 
   if (mqttClient.connected()) {
+    mqttConnectAttempts0 = 0;
+    mqttConnectAttempts1 = 0;
     if (dsReady){
       if (mqttPublishReq){
         publishTemp(TOPIC_PUB_TEMP_RESP);
@@ -602,7 +654,13 @@ void loop() {
     }
     mqttClient.loop();
   } else {
-    Serial.print("Attempting MQTT connection... ");
+    if (!(mqttConnectAttempts0 || mqttConnectAttempts1)){
+      Serial.print("Attempting MQTT connection");
+    } else if (!mqttConnectAttempts0){
+      Serial.print(".");
+      mqttConnectAttempts1++;
+    }
+    mqttConnectAttempts0++;
     if (millis() - mqttLastReconnectAttempt > MQTT_CONNECT_RETRY_TIME) {
       if (mqttReconnect()) {
         Serial.println("connected");
@@ -618,7 +676,7 @@ void loop() {
     }
   }
 
-  if (DS_DEVICE_COUNT && (millis() - dsLastRequest > dsInterval)) {
+  if (dsDeviceCount && (millis() - dsLastRequest > dsInterval)) {
     if (dsStatus & DS_READ){
       if (!oneWireReset()){
         DS_NEXT(DS_CONNECTION_ERROR, DS_CONNECTION_ERROR_TIME);
@@ -668,7 +726,7 @@ void loop() {
       dsRetryCount = 0;
       dsIndex++;
 
-      if (dsIndex >= DS_DEVICE_COUNT){       
+      if (dsIndex >= dsDeviceCount){       
         dsIndex = 0;
         if (!dsError){
           dsReady = true;
