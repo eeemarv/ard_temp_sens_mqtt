@@ -8,13 +8,29 @@
 #include <Watchdog.h>
 #include <.env.h>
 
-#define ETHERNET_SELECT_PIN 10
-#define SERIAL_BAUD 115200
-#define DS_READ_TEST
+#ifndef MAC_4_LAST
+  #define MAC_4_LAST 0xbe, 0xef, 0x13, 0x00
+#endif
+#ifndef MQTT_SERVER_IP
+  #define MQTT_SERVER_IP 192, 168, 0, 20
+#endif
+#ifndef ETHERNET_SELECT_PIN 
+  #define ETHERNET_SELECT_PIN 10
+#endif
+#ifndef SERIAL_BAUD 
+  #define SERIAL_BAUD 115200
+#endif
 
-#define TOPIC_SUB_TEMP_REQ "water:req"
-#define TOPIC_PUB_TEMP_RESP "water:resp"
-#define TOPIC_PUB_TEMP_CONTINOUS "water:cont"
+#ifndef TOPIC_SUB_REQ
+  #define TOPIC_SUB_REQ "req/sens/w0"
+#endif
+#ifndef TOPIC_PUB
+  #define TOPIC_PUB "sens/w0"
+#endif
+
+#ifndef MQTT_CLIENT_ID_PREFIX
+  #define MQTT_CLIENT_ID_PREFIX "w0_"
+#endif
 
 #define DS_TEMP_LSB 0
 #define DS_TEMP_MSB 1
@@ -122,12 +138,16 @@ typedef uint8_t DsScratchPad[DS_SCRATCHPAD_SIZE];
   dsLastRequest = millis(); \
   return;
 
-#define SERIAL_PRINT_HEX(N) \
-  if (N < 16){ \
-    Serial.print("0"); \
-  } \
-  Serial.print(N, HEX); \
-  Serial.print(" ");
+#ifdef SERIAL_EN
+  #define SERIAL_PRINT_HEX(N) \
+    if (N < 16){ \
+      Serial.print("0"); \
+    } \
+    Serial.print(N, HEX); \
+    Serial.print(" ");
+#else
+  #define SERIAL_PRINT_HEX(N)
+#endif
 
 // See https://stackoverflow.com/a/63468969
 template< unsigned N > 
@@ -137,13 +157,14 @@ inline static void nops(){
 }
 template<> inline void nops<0>(){};
 
-const byte mac[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED};
-const IPAddress ip(192, 168, 0, 80);
-const IPAddress mqttServerIP(192, 168, 0, 100);
+const byte mac[] = {0xDE, 0xAD, MAC_4_LAST};
+const IPAddress mqttServerIP(MQTT_SERVER_IP);
 EthernetClient ethClient;
 PubSubClient mqttClient(ethClient);
 
-Watchdog watchdog;
+#ifdef WATCHDOG_EN
+  Watchdog watchdog;
+#endif
 
 uint32_t mqttLastReconnectAttempt = 0;
 bool mqttPublishReq = false;
@@ -388,15 +409,19 @@ inline bool oneWireSearchRomOneAddr(){
   uint8_t eepromCurRomByteIndex;
 
   if (!oneWireReset()){
-    Serial.println("No devices found on reset.");
+    #ifdef SERIAL_EN
+      Serial.println("No devices found on reset.");
+    #endif
     return false;
   }
 
   oneWireWriteByte(DS_SEARCH_ROM_COMMAND);
 
-  Serial.print("adr.");
-  Serial.print(dsIndex, HEX);
-  Serial.print(": ");
+  #ifdef SERIAL_EN
+    Serial.print("adr.");
+    Serial.print(dsIndex, HEX);
+    Serial.print(": ");
+  #endif
 
   for (bitPos = 0; bitPos < ONE_WIRE_ADDRESS_BIT_SIZE; bitPos++){
     uint8_t romByteMask = 1 << (bitPos & 0x07);
@@ -418,7 +443,9 @@ inline bool oneWireSearchRomOneAddr(){
     readBitComp = oneWireReadBit();
 
     if (readBit && readBitComp){
-      Serial.println("search ROM: no devices.");
+      #ifdef SERIAL_EN
+        Serial.println("search ROM: no devices.");
+      #endif
       return false;
     }
 
@@ -434,7 +461,9 @@ inline bool oneWireSearchRomOneAddr(){
 
     if (bitPos < prevDiscBitPos){
       if (dsIndex == 0){
-        Serial.println("Search error: discrepancy on dsIndex 0.");
+        #ifdef SERIAL_EN
+          Serial.println("Search error: discrepancy on dsIndex 0.");
+        #endif
         return false;
       }
       if (romByteMask & prevRomByte){
@@ -470,8 +499,10 @@ inline bool oneWireSearchRomOneAddr(){
  * check CRC bytes.
  */
 void oneWireSearchRomAllAddr(){
-  Serial.println();
-  Serial.println("Search ROM");
+  #ifdef SERIAL_EN
+    Serial.println();
+    Serial.println("Search ROM");
+  #endif
   prevDiscBitPos = PREV_DISC_BIT_POS_INIT;
 
   for (dsIndex = DS_INDEX_INIT; dsIndex < DS_MAX_DEVICE_COUNT; dsIndex++){
@@ -483,10 +514,14 @@ void oneWireSearchRomAllAddr(){
         crc8 = oneWireCrc8(crc8);
       }
       if (crc8){
-        Serial.println("CRC error");
+        #ifdef SERIAL_EN
+          Serial.println("CRC error");
+        #endif
         stop();
       }
-      Serial.println("CRC ok");
+      #ifdef SERIAL_EN
+        Serial.println("CRC ok");
+      #endif
 
       if (prevDiscBitPos >= 0){
         // search next
@@ -496,43 +531,52 @@ void oneWireSearchRomAllAddr(){
       dsDeviceCount = dsIndex + 1;
       break;
     }
-    Serial.print("error on search ROM");
+    #ifdef SERIAL_EN
+      Serial.print("error on search ROM");
+    #endif
     stop();    
   }
   EEPROM.update(EEPROM_DS_DEVICE_COUNT, dsDeviceCount);
-  Serial.print("Device count:");
-  Serial.print(dsDeviceCount);
-  Serial.println();
+  #ifdef SERIAL_EN
+    Serial.print("Device count:");
+    Serial.print(dsDeviceCount);
+    Serial.println();
+  #endif
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  #ifdef SERIAL_EN
   uint8_t iii;
+  #endif
 
-  if (topic == TOPIC_SUB_TEMP_REQ){
-    Serial.print("sub rec: ");
-    Serial.print(topic);
-    Serial.print(" : ");
-    for (iii = 0; iii < length; iii++) {
-      Serial.print((char) payload[iii]);
-    }
+  if (strcmp(topic, TOPIC_SUB_REQ) == 0){
+    #ifdef SERIAL_EN
+      Serial.print("sub rec: ");
+      Serial.print(topic);
+      Serial.print(" : ");
+      for (iii = 0; iii < length; iii++) {
+        Serial.print((char) payload[iii]);
+      }
+    #endif
     mqttPublishReq = true;
   }
 }
 
 bool mqttReconnect() {
-  String clientId = "temp_sens_";
+  String clientId = MQTT_CLIENT_ID_PREFIX;
   clientId += String(random(0xffff), HEX);
   if (mqttClient.connect(clientId.c_str())) {
-    mqttClient.subscribe(TOPIC_SUB_TEMP_REQ);
+    mqttClient.subscribe(TOPIC_SUB_REQ);
   }
   return mqttClient.connected();
 }
 
-bool publishTemp(String topic) {
+bool publishTemp() {
   uint8_t jjj;
   String temp;
   uint32_t accTemp = 0;
   uint8_t accTempDiv = 0;
+  String topic = TOPIC_PUB;
 
   for (jjj = 0; jjj < dsDeviceCount; jjj++){
     dsSort[jjj] = jjj;
@@ -555,10 +599,13 @@ bool publishTemp(String topic) {
   }
 
   temp = (String)(float) ((accTemp / accTempDiv) * DS_RAW_TO_C_MUL);
-  Serial.print("pub: ");
-  Serial.print(topic);
-  Serial.print(" : ");
-  Serial.println(temp);
+
+  #ifdef SERIAL_EN
+    Serial.print("pub: ");
+    Serial.print(topic);
+    Serial.print(" : ");
+    Serial.println(temp);
+  #endif
 
   return mqttClient.publish(topic.c_str(), temp.c_str());
 }
@@ -584,25 +631,35 @@ void setup() {
   mqttClient.setCallback(mqttCallback);
   Ethernet.init(ETHERNET_SELECT_PIN);
   SPI.begin();
-  Ethernet.begin(mac, ip);
-  Serial.begin(SERIAL_BAUD);
-  while (!Serial) {
-    ; // wait for serial port to connect. Needed for native USB port only
-  }
+  Ethernet.begin(mac);
+  #ifdef SERIAL_EN
+    Serial.begin(SERIAL_BAUD);
+    while (!Serial) {
+      ; // wait for serial port to connect. Needed for native USB port only
+    }
+  #endif
 
   delay(250);
-  watchdog.enable(Watchdog::TIMEOUT_4S);
+  #ifdef WATCHDOG_EN
+    watchdog.enable(Watchdog::TIMEOUT_4S);
+  #endif
 
   oneWireSearchRomAllAddr();
 
-  Serial.println("Set devices to 12bit mode");
+  #ifdef SERIAL_EN
+    Serial.println("Set devices to 12bit mode");
+  #endif
   for (dsIndex = 0; dsIndex < dsDeviceCount; dsIndex++){
     oneWireReadDsScratchPath();
-    Serial.print("adr.");
-    Serial.print(dsIndex, HEX);
-    Serial.print(": ");
+    #ifdef SERIAL_EN
+      Serial.print("adr.");
+      Serial.print(dsIndex, HEX);
+      Serial.print(": ");
+    #endif
     if (dsScratchPad[DS_SCRATCHPAD_CONFIG] == DS_CONFIG_12_BIT){
-      Serial.println("no update.");
+      #ifdef SERIAL_EN
+        Serial.println("no update.");
+      #endif
       continue;
     }
     oneWireReset();
@@ -616,28 +673,38 @@ void setup() {
     oneWireRomSelect();
     oneWireWriteByte(DS_COPY_SCRATCHPAD_COMMAND);
     delay(50);
-    Serial.println("updated.");
+    #ifdef SERIAL_EN
+      Serial.println("updated.");
+    #endif
   }
   dsIndex = DS_INDEX_INIT;
 
   if (Ethernet.hardwareStatus() == EthernetHardwareStatus::EthernetNoHardware) {
-    Serial.println("ENC28J60 not found.");
+    #ifdef SERIAL_EN
+      Serial.println("ENC28J60 not found.");
+    #endif
     while(1){
       delay(1);
     }
   }
 
   if (Ethernet.linkStatus() == EthernetLinkStatus::LinkOFF) {
-    Serial.println("Ethernet not connected.");
+    #ifdef SERIAL_EN
+      Serial.println("Ethernet not connected.");
+    #endif
   } else {
-    Serial.println("Ethernet ok.");
+    #ifdef SERIAL_EN
+      Serial.println("Ethernet ok.");
+    #endif
   }
 
   dsLastRequest = millis();
 }
 
 void loop() {
-  watchdog.reset();
+  #ifdef WATCHDOG_EN
+    watchdog.reset();
+  #endif
   Ethernet.maintain();
 
   if (mqttClient.connected()) {
@@ -645,32 +712,40 @@ void loop() {
     mqttConnectAttempts1 = 0;
     if (dsReady){
       if (mqttPublishReq){
-        publishTemp(TOPIC_PUB_TEMP_RESP);
+        publishTemp();
         mqttPublishReq = false;
       } else if (mqttPublishTrig) {
-        publishTemp(TOPIC_PUB_TEMP_CONTINOUS);      
+        publishTemp();      
         mqttPublishTrig = false;
       }
     }
     mqttClient.loop();
   } else {
     if (!(mqttConnectAttempts0 || mqttConnectAttempts1)){
-      Serial.print("Attempting MQTT connection");
+      #ifdef SERIAL_EN
+        Serial.print("Attempting MQTT connection");
+      #endif
     } else if (!mqttConnectAttempts0){
-      Serial.print(".");
+      #ifdef SERIAL_EN
+        Serial.print(".");
+      #endif
       mqttConnectAttempts1++;
     }
     mqttConnectAttempts0++;
     if (millis() - mqttLastReconnectAttempt > MQTT_CONNECT_RETRY_TIME) {
       if (mqttReconnect()) {
-        Serial.println("connected");
+        #ifdef SERIAL_EN
+          Serial.println("connected");
+        #endif
         mqttLastReconnectAttempt = 0;
       } else {
-        Serial.print("failed, rc=");
-        Serial.print(mqttClient.state());
-        Serial.print(" try again in ");
-        Serial.print(MQTT_CONNECT_RETRY_TIME);
-        Serial.println(" ms.");
+        #ifdef SERIAL_EN
+          Serial.print("failed, rc=");
+          Serial.print(mqttClient.state());
+          Serial.print(" try again in ");
+          Serial.print(MQTT_CONNECT_RETRY_TIME);
+          Serial.println(" ms.");
+        #endif
         mqttLastReconnectAttempt = millis();
       }
     }
@@ -686,9 +761,11 @@ void loop() {
 
       if (!oneWireReadDsScratchPath()){
 
-        Serial.print("ERR");
-        Serial.print(dsRetryCount);
-        Serial.print(" ");
+        #ifdef SERIAL_EN
+          Serial.print("ERR");
+          Serial.print(dsRetryCount);
+          Serial.print(" ");
+        #endif
 
         dsRetryCount++;
 
@@ -704,14 +781,18 @@ void loop() {
       dsTemp[dsIndex] = (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_MSB]) << 11)
         | (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_LSB]) << 3);
 
-      if (!dsIndex){ 
+      if (!dsIndex){
+        #ifdef SERIAL_EN
         Serial.print("*");
         Serial.print((float) dsTemp[dsIndex] * DS_RAW_TO_C_MUL);
         Serial.print("* ");
+        #endif
       }
 
-      Serial.print(dsTemp[dsIndex]);
-      Serial.print(", ");
+      #ifdef SERIAL_EN
+        Serial.print(dsTemp[dsIndex]);
+        Serial.print(", ");
+      #endif
 
       DS_NEXT(DS_INDEX, DS_READ_TIME);
 
@@ -739,11 +820,13 @@ void loop() {
 
     } else if (dsStatus & DS_REQUEST) {
      
-      if (!dsRetryCount){
-        Serial.print("i");
-        Serial.print(dsIndex);
-        Serial.print(": ");
-      }
+      #ifdef SERIAL_EN
+        if (!dsRetryCount){
+          Serial.print("i");
+          Serial.print(dsIndex);
+          Serial.print(": ");
+        }
+      #endif
 
       if (!oneWireReset()){
         DS_NEXT(DS_CONNECTION_ERROR, DS_CONNECTION_ERROR_TIME);
@@ -752,11 +835,13 @@ void loop() {
       oneWireRomSelect();
       oneWireWriteByte(DS_CONVERT_TEMP_COMMAND);
 
-      if (dsRetryCount){
-        Serial.print("REQ");
-        Serial.print(dsRetryCount / 16);
-        Serial.print(" ");
-      }
+      #ifdef SERIAL_EN
+        if (dsRetryCount){
+          Serial.print("REQ");
+          Serial.print(dsRetryCount / 16);
+          Serial.print(" ");
+        }
+      #endif
 
       DS_NEXT(DS_READ, DS_REQUEST_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
 
