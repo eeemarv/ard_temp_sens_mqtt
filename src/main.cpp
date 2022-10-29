@@ -158,6 +158,9 @@ inline static void nops(){
 template<> inline void nops<0>(){};
 
 const byte mac[] = {0xDE, 0xAD, MAC_4_LAST};
+#ifdef IP_SELF
+  const IPAddress ipSelf(IP_SELF);
+#endif
 const IPAddress mqttServerIP(MQTT_SERVER_IP);
 EthernetClient ethClient;
 PubSubClient mqttClient(ethClient);
@@ -631,7 +634,11 @@ void setup() {
   mqttClient.setCallback(mqttCallback);
   Ethernet.init(ETHERNET_SELECT_PIN);
   SPI.begin();
-  Ethernet.begin(mac);
+  #ifdef IP_SELF 
+    Ethernet.begin(mac, ipSelf);
+  #else
+    Ethernet.begin(mac);
+  #endif
   #ifdef SERIAL_EN
     Serial.begin(SERIAL_BAUD);
     while (!Serial) {

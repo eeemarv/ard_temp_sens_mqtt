@@ -5,6 +5,7 @@
 */
 
 #define MQTT_SERVER_IP 192, 168, 0, 40
+#define IP_SELF 192, 168, 0, 80  // do not define when using DHCP
 #define MAC_4_LAST 0xbe, 0xef, 0xfe, 0xed
 #define ETHERNET_SELECT_PIN 10
 #define SERIAL_BAUD 9600
