@@ -7,30 +7,7 @@
 #include <EthernetENC.h>
 #include <Watchdog.h>
 #include <.env.h>
-
-#ifndef MAC_4_LAST
-  #define MAC_4_LAST 0xbe, 0xef, 0x13, 0x00
-#endif
-#ifndef MQTT_SERVER_IP
-  #define MQTT_SERVER_IP 192, 168, 0, 20
-#endif
-#ifndef ETHERNET_SELECT_PIN 
-  #define ETHERNET_SELECT_PIN 10
-#endif
-#ifndef SERIAL_BAUD 
-  #define SERIAL_BAUD 115200
-#endif
-
-#ifndef TOPIC_SUB_REQ
-  #define TOPIC_SUB_REQ "req/sens/w0"
-#endif
-#ifndef TOPIC_PUB
-  #define TOPIC_PUB "sens/w0"
-#endif
-
-#ifndef MQTT_CLIENT_ID_PREFIX
-  #define MQTT_CLIENT_ID_PREFIX "w0_"
-#endif
+#include <env_defaults.h>
 
 #define DS_TEMP_LSB 0
 #define DS_TEMP_MSB 1
@@ -50,8 +27,7 @@
 #define DS_RETRY_AFTER_CONNECTION_ERROR_TIME 1000
 
 #define DS_INDEX_INIT 0
-#define DS_MAX_DEVICE_COUNT 8
-#define DS_DEVICE_SORT_SELECT B00011000
+#define DS_MAX_DEVICE_COUNT 16
 
 #define DS_REQUEST 0x01
 #define DS_READ 0x02
@@ -157,10 +133,8 @@ inline static void nops(){
 }
 template<> inline void nops<0>(){};
 
-const byte mac[] = {0xDE, 0xAD, MAC_4_LAST};
-#ifdef IP_SELF
-  const IPAddress ipSelf(IP_SELF);
-#endif
+byte mac[] = {0xDE, 0xAD, MAC_4_LAST};
+const IPAddress selfIP(SELF_IP);
 const IPAddress mqttServerIP(MQTT_SERVER_IP);
 EthernetClient ethClient;
 PubSubClient mqttClient(ethClient);
@@ -188,6 +162,7 @@ DsScratchPad dsScratchPad;
 
 uint8_t mqttConnectAttempts0 = 0;
 uint8_t mqttConnectAttempts1 = 0;
+uint32_t lastPresence = 0;
 
 const uint8_t* adr;
 
@@ -552,7 +527,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   uint8_t iii;
   #endif
 
-  if (strcmp(topic, TOPIC_SUB_REQ) == 0){
+  if (strcmp(topic, SUB_REQ_WATER_TEMP) == 0){
     #ifdef SERIAL_EN
       Serial.print("sub rec: ");
       Serial.print(topic);
@@ -566,20 +541,29 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 bool mqttReconnect() {
-  String clientId = MQTT_CLIENT_ID_PREFIX;
-  clientId += String(random(0xffff), HEX);
-  if (mqttClient.connect(clientId.c_str())) {
-    mqttClient.subscribe(TOPIC_SUB_REQ);
+  uint8_t iii;
+  uint8_t charPos;
+  char clientId[10] = CLIENT_ID_PREFIX;
+  for (iii = 0; iii < 4; iii++){
+    charPos = strlen(clientId);
+    clientId[charPos] = '0' + random(0, 10);
+    clientId[charPos + 1] = '\0';
+  }
+  if (mqttClient.connect(clientId)) {
+    mqttClient.subscribe(SUB_REQ_WATER_TEMP);
   }
   return mqttClient.connected();
 }
 
 bool publishTemp() {
   uint8_t jjj;
-  String temp;
-  uint32_t accTemp = 0;
+  uint8_t dvc;
+  float temp;
+  char m1[8];
+  char m2[8];
+  uint8_t len;
+  int32_t accTemp = 0;
   uint8_t accTempDiv = 0;
-  String topic = TOPIC_PUB;
 
   for (jjj = 0; jjj < dsDeviceCount; jjj++){
     dsSort[jjj] = jjj;
@@ -593,24 +577,51 @@ bool publishTemp() {
     }
   }
 
+  #ifdef SERIAL_EN
+    Serial.print("Sort select: ");
+  #endif 
+
   for (jjj = 0; jjj < dsDeviceCount; jjj++){
-    if (DS_DEVICE_SORT_SELECT & jjj){
-      continue;
-      accTemp += dsTemp[dsSort[jjj]];
-      accTempDiv++;     
+    if (dsDeviceCount > 5){
+      dvc = dsDeviceCount / 2;  
+      if (jjj > (dvc + 1)){
+        continue;
+      }
+      if (jjj < (dvc - 2)){
+        continue;
+      }
     }
+    #ifdef SERIAL_EN
+      Serial.print(dsSort[jjj]);
+      Serial.print(" ");
+    #endif 
+    accTemp += dsTemp[dsSort[jjj]];
+    accTempDiv++;     
   }
 
-  temp = (String)(float) ((accTemp / accTempDiv) * DS_RAW_TO_C_MUL);
+  temp = (float) ((accTemp / accTempDiv) * DS_RAW_TO_C_MUL);
 
   #ifdef SERIAL_EN
+    Serial.println();
     Serial.print("pub: ");
-    Serial.print(topic);
+    Serial.print(PUB_WATER_TEMP);
     Serial.print(" : ");
     Serial.println(temp);
   #endif
 
-  return mqttClient.publish(topic.c_str(), temp.c_str());
+  itoa((int)floorf(temp), m1, 10);
+  strcat(m1, ".");
+  itoa((((int)(temp * 100)) % 100), m2, 10);
+  len = strlen(m2);
+  if (len < 2){
+    strcat(m1, "0");
+    if (len == 0){
+      strcat(m1, "0");      
+    }
+  }
+  strcat(m1, m2);
+
+  return mqttClient.publish(PUB_WATER_TEMP, m1);
 }
 
 void setup() {
@@ -632,13 +643,9 @@ void setup() {
 #endif
   mqttClient.setServer(mqttServerIP, 1883);
   mqttClient.setCallback(mqttCallback);
-  Ethernet.init(ETHERNET_SELECT_PIN);
+  Ethernet.init(ETH_CS_PIN);
   SPI.begin();
-  #ifdef IP_SELF 
-    Ethernet.begin(mac, ipSelf);
-  #else
-    Ethernet.begin(mac);
-  #endif
+  Ethernet.begin(mac, selfIP);
   #ifdef SERIAL_EN
     Serial.begin(SERIAL_BAUD);
     while (!Serial) {
@@ -726,11 +733,21 @@ void loop() {
         mqttPublishTrig = false;
       }
     }
+
+    if (millis() - lastPresence >  PRESENCE_INTERVAL){
+      #ifdef SERIAL_EN
+      Serial.print("pub: ");
+      Serial.println(PUB_PRESENCE);
+      #endif
+      mqttClient.publish(PUB_PRESENCE, "1");
+      lastPresence = millis();
+    }
+
     mqttClient.loop();
   } else {
     if (!(mqttConnectAttempts0 || mqttConnectAttempts1)){
       #ifdef SERIAL_EN
-        Serial.print("Attempting MQTT connection");
+        Serial.print(".m");
       #endif
     } else if (!mqttConnectAttempts0){
       #ifdef SERIAL_EN
@@ -788,15 +805,10 @@ void loop() {
       dsTemp[dsIndex] = (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_MSB]) << 11)
         | (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_LSB]) << 3);
 
-      if (!dsIndex){
-        #ifdef SERIAL_EN
-        Serial.print("*");
-        Serial.print((float) dsTemp[dsIndex] * DS_RAW_TO_C_MUL);
-        Serial.print("* ");
-        #endif
-      }
-
       #ifdef SERIAL_EN
+        Serial.print("*");
+        Serial.print((float) (dsTemp[dsIndex] * DS_RAW_TO_C_MUL));
+        Serial.print("* ");
         Serial.print(dsTemp[dsIndex]);
         Serial.print(", ");
       #endif
