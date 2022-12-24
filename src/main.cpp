@@ -16,24 +16,18 @@
 
 #define DS_INIT_TIME 2000
 #define DS_REQUEST_TIME 850
-#define DS_RETRY_REQUEST_TIME 900
 #define DS_READ_TIME 50
 #define DS_RETRY_TIME 100
-#define DS_FAIL_TIME 50
-#define DS_INDEX_TIME 1000
-#define DS_MAX_RETRY 64
+#define DS_INDEX_TIME 200
+#define DS_MAX_RETRY 16
 #define DS_RETRY_INCREASE_TIME 25
-#define DS_CONNECTION_ERROR_TIME 50
-#define DS_RETRY_AFTER_CONNECTION_ERROR_TIME 1000
 
 #define DS_INDEX_INIT 0
 #define DS_MAX_DEVICE_COUNT 16
 
 #define DS_REQUEST 0x01
 #define DS_READ 0x02
-#define DS_FAIL 0x04
 #define DS_INDEX 0x08
-#define DS_CONNECTION_ERROR 0x10
 
 #define LOW_NIBBLE 0x0f
 #define HIGH_NIBBLE 0xf0
@@ -777,8 +771,11 @@ void loop() {
 
   if (dsDeviceCount && (millis() - dsLastRequest > dsInterval)) {
     if (dsStatus & DS_READ){
-      if (!oneWireReset()){
-        DS_NEXT(DS_CONNECTION_ERROR, DS_CONNECTION_ERROR_TIME);
+      if (!oneWireReset()){ 
+        while(true){
+        // Connection error 
+        // reset by watchdog
+        }
       }
 
       oneWireRomSelect();
@@ -794,12 +791,13 @@ void loop() {
         dsRetryCount++;
 
         if (dsRetryCount >= DS_MAX_RETRY){
-          DS_NEXT(DS_FAIL, DS_RETRY_TIME);
+            while(true){
+            // Fails to read
+            // reset by watchdog
+            }
         } 
-        if (dsRetryCount & LOW_NIBBLE){
-          DS_NEXT(DS_READ, DS_RETRY_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
-        } 
-        DS_NEXT(DS_REQUEST, DS_RETRY_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
+
+        DS_NEXT(DS_READ, DS_RETRY_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
       }
 
       dsTemp[dsIndex] = (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_MSB]) << 11)
@@ -815,12 +813,6 @@ void loop() {
 
       DS_NEXT(DS_INDEX, DS_READ_TIME);
 
-    } else if (dsStatus & DS_FAIL){
-
-      dsError = true;
-      dsReady = false;
-      DS_NEXT(DS_INDEX, DS_FAIL_TIME);
-  
     } else if (dsStatus & DS_INDEX) {
 
       dsRetryCount = 0;
@@ -848,7 +840,10 @@ void loop() {
       #endif
 
       if (!oneWireReset()){
-        DS_NEXT(DS_CONNECTION_ERROR, DS_CONNECTION_ERROR_TIME);
+        while(true){
+        // Connection error 
+        // reset by watchdog
+        }
       }
 
       oneWireRomSelect();
@@ -864,9 +859,6 @@ void loop() {
 
       DS_NEXT(DS_READ, DS_REQUEST_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
 
-    } else if (dsStatus & DS_CONNECTION_ERROR){
-
-      DS_NEXT(DS_REQUEST, DS_RETRY_AFTER_CONNECTION_ERROR_TIME);
     }
 
     dsLastRequest = millis();
