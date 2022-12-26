@@ -15,12 +15,9 @@
 #define DS_FILTER_ADAPT_STEP 4
 
 #define DS_INIT_TIME 2000
-#define DS_REQUEST_TIME 850
-#define DS_READ_TIME 50
-#define DS_RETRY_TIME 100
+#define DS_REQUEST_TIME 1600
+#define DS_READ_TIME 200
 #define DS_INDEX_TIME 200
-#define DS_MAX_RETRY 16
-#define DS_RETRY_INCREASE_TIME 25
 
 #define DS_INDEX_INIT 0
 #define DS_MAX_DEVICE_COUNT 16
@@ -108,6 +105,11 @@ typedef uint8_t DsScratchPad[DS_SCRATCHPAD_SIZE];
   dsLastRequest = millis(); \
   return;
 
+#define DS_RESTART_CYCLE \
+  dsError = true; \
+  dsIndex = dsDeviceCount; \
+  DS_NEXT(DS_INDEX, DS_INDEX_TIME);
+
 #ifdef SERIAL_EN
   #define SERIAL_PRINT_HEX(N) \
     if (N < 16){ \
@@ -138,25 +140,27 @@ PubSubClient mqttClient(ethClient);
 #endif
 
 uint32_t mqttLastReconnectAttempt = 0;
-bool mqttPublishReq = false;
 bool mqttPublishTrig = false;
 
 uint32_t dsLastRequest = 0;
 uint16_t dsInterval = DS_INIT_TIME;
-uint8_t dsRetryCount = 0;
 uint8_t dsStatus = DS_REQUEST;
 uint8_t dsIndex = DS_INDEX_INIT;
 uint8_t dsDeviceCount;
 int8_t prevDiscBitPos = -1;
-bool dsReady = false;
 bool dsError = false;
 int16_t dsTemp[DS_MAX_DEVICE_COUNT];
 uint8_t dsSort[DS_MAX_DEVICE_COUNT];
 DsScratchPad dsScratchPad;
+float temperature;
 
 uint8_t mqttConnectAttempts0 = 0;
 uint8_t mqttConnectAttempts1 = 0;
 uint32_t lastPresence = 0;
+
+uint16_t errorsConnectCount = 0;
+uint16_t errors85Count = 0;
+uint32_t lastErrorsPub = 0;
 
 const uint8_t* adr;
 
@@ -517,21 +521,6 @@ void oneWireSearchRomAllAddr(){
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  #ifdef SERIAL_EN
-  uint8_t iii;
-  #endif
-
-  if (strcmp(topic, SUB_REQ_WATER_TEMP) == 0){
-    #ifdef SERIAL_EN
-      Serial.print("sub rec: ");
-      Serial.print(topic);
-      Serial.print(" : ");
-      for (iii = 0; iii < length; iii++) {
-        Serial.print((char) payload[iii]);
-      }
-    #endif
-    mqttPublishReq = true;
-  }
 }
 
 bool mqttReconnect() {
@@ -544,18 +533,14 @@ bool mqttReconnect() {
     clientId[charPos + 1] = '\0';
   }
   if (mqttClient.connect(clientId)) {
-    mqttClient.subscribe(SUB_REQ_WATER_TEMP);
+    // subs
   }
   return mqttClient.connected();
 }
 
-bool publishTemp() {
+void calcTemperature(){
   uint8_t jjj;
   uint8_t dvc;
-  float temp;
-  char m1[8];
-  char m2[8];
-  uint8_t len;
   int32_t accTemp = 0;
   uint8_t accTempDiv = 0;
 
@@ -593,19 +578,25 @@ bool publishTemp() {
     accTempDiv++;     
   }
 
-  temp = (float) ((accTemp / accTempDiv) * DS_RAW_TO_C_MUL);
+  temperature = (float) (((float) accTemp / accTempDiv) * DS_RAW_TO_C_MUL);
+}
+
+bool publishTemp() {
+  char m1[8];
+  char m2[8];
+  uint8_t len;
 
   #ifdef SERIAL_EN
     Serial.println();
     Serial.print("pub: ");
     Serial.print(PUB_WATER_TEMP);
     Serial.print(" : ");
-    Serial.println(temp);
+    Serial.println(temperature);
   #endif
 
-  itoa((int)floorf(temp), m1, 10);
+  itoa((int)floorf(temperature), m1, 10);
   strcat(m1, ".");
-  itoa((((int)(temp * 100)) % 100), m2, 10);
+  itoa((((int)(temperature * 100)) % 100), m2, 10);
   len = strlen(m2);
   if (len < 2){
     strcat(m1, "0");
@@ -710,6 +701,10 @@ void setup() {
 }
 
 void loop() {
+  char msg1[16];
+  char msg2[8];
+  int16_t tmprtr;
+
   #ifdef WATCHDOG_EN
     watchdog.reset();
   #endif
@@ -718,14 +713,9 @@ void loop() {
   if (mqttClient.connected()) {
     mqttConnectAttempts0 = 0;
     mqttConnectAttempts1 = 0;
-    if (dsReady){
-      if (mqttPublishReq){
-        publishTemp();
-        mqttPublishReq = false;
-      } else if (mqttPublishTrig) {
-        publishTemp();      
-        mqttPublishTrig = false;
-      }
+    if (mqttPublishTrig) {
+      publishTemp();      
+      mqttPublishTrig = false;
     }
 
     if (millis() - lastPresence >  PRESENCE_INTERVAL){
@@ -735,6 +725,25 @@ void loop() {
       #endif
       mqttClient.publish(PUB_PRESENCE, "1");
       lastPresence = millis();
+    }
+
+    if (millis() - lastErrorsPub > ERRORS_INTERVAL){
+      #ifdef SERIAL_EN
+      Serial.print("pub: ");
+      Serial.println(PUB_ERRORS);
+      Serial.print("e85: ");
+      Serial.print(errors85Count);
+      Serial.print(" econn: ");
+      Serial.println(errorsConnectCount);
+      #endif
+      strcpy(msg1, "e85: ");
+      itoa(errors85Count, msg2, 10);
+      strcat(msg1, msg2);
+      strcat(msg1, " econn: ");
+      itoa(errorsConnectCount, msg2, 10);
+      strcat(msg1, msg2);
+      mqttClient.publish(PUB_ERRORS, msg1);
+      lastErrorsPub = millis();
     }
 
     mqttClient.loop();
@@ -771,11 +780,12 @@ void loop() {
 
   if (dsDeviceCount && (millis() - dsLastRequest > dsInterval)) {
     if (dsStatus & DS_READ){
-      if (!oneWireReset()){ 
-        while(true){
-        // Connection error 
-        // reset by watchdog
-        }
+      if (!oneWireReset()){
+        #ifdef SERIAL_EN
+        Serial.println("ERR oneWire reset");
+        #endif 
+        errorsConnectCount++;
+        DS_RESTART_CYCLE;
       }
 
       oneWireRomSelect();
@@ -783,31 +793,28 @@ void loop() {
       if (!oneWireReadDsScratchPath()){
 
         #ifdef SERIAL_EN
-          Serial.print("ERR");
-          Serial.print(dsRetryCount);
-          Serial.print(" ");
+        Serial.print("ERR scratchpad");
         #endif
 
-        dsRetryCount++;
-
-        if (dsRetryCount >= DS_MAX_RETRY){
-            while(true){
-            // Fails to read
-            // reset by watchdog
-            }
-        } 
-
-        DS_NEXT(DS_READ, DS_RETRY_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
+        errorsConnectCount++;
+        DS_RESTART_CYCLE;
       }
 
-      dsTemp[dsIndex] = (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_MSB]) << 11)
+      tmprtr = (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_MSB]) << 11)
         | (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_LSB]) << 3);
+
+      if (tmprtr >=  0x0550){
+        errors85Count++;
+        DS_RESTART_CYCLE;
+      }
+
+      dsTemp[dsIndex] = tmprtr;
 
       #ifdef SERIAL_EN
         Serial.print("*");
-        Serial.print((float) (dsTemp[dsIndex] * DS_RAW_TO_C_MUL));
+        Serial.print((float) (tmprtr * DS_RAW_TO_C_MUL));
         Serial.print("* ");
-        Serial.print(dsTemp[dsIndex]);
+        Serial.print(tmprtr);
         Serial.print(", ");
       #endif
 
@@ -815,13 +822,12 @@ void loop() {
 
     } else if (dsStatus & DS_INDEX) {
 
-      dsRetryCount = 0;
       dsIndex++;
 
       if (dsIndex >= dsDeviceCount){       
         dsIndex = 0;
         if (!dsError){
-          dsReady = true;
+          calcTemperature();
           mqttPublishTrig = true;
         }
         dsError = false;
@@ -832,33 +838,22 @@ void loop() {
     } else if (dsStatus & DS_REQUEST) {
      
       #ifdef SERIAL_EN
-        if (!dsRetryCount){
-          Serial.print("i");
-          Serial.print(dsIndex);
-          Serial.print(": ");
-        }
+        Serial.print("i");
+        Serial.print(dsIndex);
+        Serial.print(": ");
       #endif
 
       if (!oneWireReset()){
-        while(true){
-        // Connection error 
-        // reset by watchdog
-        }
+        #ifdef SERIAL_EN
+          Serial.println("ERR req reset conn");
+        #endif
+        errorsConnectCount++;
+        DS_RESTART_CYCLE;
       }
 
       oneWireRomSelect();
       oneWireWriteByte(DS_CONVERT_TEMP_COMMAND);
-
-      #ifdef SERIAL_EN
-        if (dsRetryCount){
-          Serial.print("REQ");
-          Serial.print(dsRetryCount / 16);
-          Serial.print(" ");
-        }
-      #endif
-
-      DS_NEXT(DS_READ, DS_REQUEST_TIME + (dsRetryCount * DS_RETRY_INCREASE_TIME));
-
+      DS_NEXT(DS_READ, DS_REQUEST_TIME);
     }
 
     dsLastRequest = millis();

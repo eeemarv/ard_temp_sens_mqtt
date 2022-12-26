@@ -13,18 +13,21 @@
 #ifndef SERIAL_BAUD 
   #define SERIAL_BAUD 115200
 #endif
-#ifndef SUB_REQ_WATER_TEMP
-  #define SUB_REQ_WATER_TEMP "req/sens/water_temp"
-#endif
 #ifndef PUB_WATER_TEMP
   #define PUB_WATER_TEMP "sens/water_temp"
 #endif
 #ifndef PUB_PRESENCE 
   #define PUB_PRESENCE "sens/p"
-#endif 
+#endif
+#ifndef PUB_ERRORS
+  #define PUB_ERRORS "sens/err"
+#endif
 #ifndef PRESENCE_INTERVAL
   #define PRESENCE_INTERVAL 5000
-#endif 
+#endif
+#ifndef ERRORS_INTERVAL
+  #define ERRORS_INTERVAL 10000
+#endif
 #ifndef CLIENT_ID_PREFIX
   #define CLIENT_ID_PREFIX "w0_"
 #endif
