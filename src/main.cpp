@@ -9,10 +9,7 @@
 #include <.env.h>
 #include <env_defaults.h>
 
-#define DS_TEMP_LSB 0
-#define DS_TEMP_MSB 1
 #define DS_RAW_TO_C_MUL 0.0078125f
-#define DS_FILTER_ADAPT_STEP 4
 
 #define DS_INIT_TIME 2000
 #define DS_REQUEST_TIME 1600
@@ -158,9 +155,9 @@ uint8_t mqttConnectAttempts0 = 0;
 uint8_t mqttConnectAttempts1 = 0;
 uint32_t lastPresence = 0;
 
-uint16_t errorsConnectCount = 0;
-uint16_t errors85Count = 0;
-uint32_t lastErrorsPub = 0;
+uint16_t dsErrorConnectCount = 0;
+uint16_t dsError85Count = 0;
+uint32_t dsLastErrorPub = 0;
 
 const uint8_t* adr;
 
@@ -609,6 +606,14 @@ bool publishTemp() {
   return mqttClient.publish(PUB_WATER_TEMP, m1);
 }
 
+/**
+ * @brief 
+ * UNO pins
+ * PD3 PWM out
+ * PD4 one wire out (connect to A6)
+ * A6 (AIN0) one wire in (pos comp)
+ * A7 (AIN1) PWM in (filtered with resistor and capicator)
+ */
 void setup() {
   delay(250);
   DDRD |= 1 << PWM_PD; // set to output
@@ -727,23 +732,23 @@ void loop() {
       lastPresence = millis();
     }
 
-    if (millis() - lastErrorsPub > ERRORS_INTERVAL){
+    if (millis() - dsLastErrorPub > ERRORS_INTERVAL){
       #ifdef SERIAL_EN
       Serial.print("pub: ");
       Serial.println(PUB_ERRORS);
       Serial.print("e85: ");
-      Serial.print(errors85Count);
+      Serial.print(dsError85Count);
       Serial.print(" econn: ");
-      Serial.println(errorsConnectCount);
+      Serial.println(dsErrorConnectCount);
       #endif
       strcpy(msg1, "e85: ");
-      itoa(errors85Count, msg2, 10);
+      itoa(dsError85Count, msg2, 10);
       strcat(msg1, msg2);
       strcat(msg1, " econn: ");
-      itoa(errorsConnectCount, msg2, 10);
+      itoa(dsErrorConnectCount, msg2, 10);
       strcat(msg1, msg2);
       mqttClient.publish(PUB_ERRORS, msg1);
-      lastErrorsPub = millis();
+      dsLastErrorPub = millis();
     }
 
     mqttClient.loop();
@@ -784,7 +789,7 @@ void loop() {
         #ifdef SERIAL_EN
         Serial.println("ERR oneWire reset");
         #endif 
-        errorsConnectCount++;
+        dsErrorConnectCount++;
         DS_RESTART_CYCLE;
       }
 
@@ -796,15 +801,19 @@ void loop() {
         Serial.print("ERR scratchpad");
         #endif
 
-        errorsConnectCount++;
+        dsErrorConnectCount++;
         DS_RESTART_CYCLE;
       }
 
       tmprtr = (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_MSB]) << 11)
         | (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_LSB]) << 3);
 
-      if (tmprtr >=  0x0550){
-        errors85Count++;
+      if (tmprtr >=  DS_MAX_RAW){
+        dsError85Count++;
+        DS_RESTART_CYCLE;
+      }
+      if (tmprtr <= DS_MIN_RAW){
+        dsError85Count++;
         DS_RESTART_CYCLE;
       }
 
@@ -847,7 +856,7 @@ void loop() {
         #ifdef SERIAL_EN
           Serial.println("ERR req reset conn");
         #endif
-        errorsConnectCount++;
+        dsErrorConnectCount++;
         DS_RESTART_CYCLE;
       }
 

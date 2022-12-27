@@ -31,3 +31,9 @@
 #ifndef CLIENT_ID_PREFIX
   #define CLIENT_ID_PREFIX "w0_"
 #endif
+#ifndef DS_MAX_RAW
+#define DS_MAX_RAW 5760  // 45°C
+#endif
+#ifndef DS_MIN_RAW
+#define DS_MIN_RAW -2560   // -20°C
+#endif
