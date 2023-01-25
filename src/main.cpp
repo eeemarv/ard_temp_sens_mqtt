@@ -12,9 +12,9 @@
 #define DS_RAW_TO_C_MUL 0.0078125f
 
 #define DS_INIT_TIME 2000
-#define DS_REQUEST_TIME 1600
-#define DS_READ_TIME 200
-#define DS_INDEX_TIME 200
+#define DS_REQUEST_TIME 900
+#define DS_READ_TIME 50
+#define DS_INDEX_TIME 50
 
 #define DS_INDEX_INIT 0
 #define DS_MAX_DEVICE_COUNT 16
@@ -575,13 +575,11 @@ void calcTemperature(){
     accTempDiv++;     
   }
 
-  temperature = (float) (((float) accTemp / accTempDiv) * DS_RAW_TO_C_MUL);
+  temperature = (float) ((((float) accTemp) / ((float) accTempDiv)) * DS_RAW_TO_C_MUL);
 }
 
 bool publishTemp() {
   char m1[8];
-  char m2[8];
-  uint8_t len;
 
   #ifdef SERIAL_EN
     Serial.println();
@@ -591,18 +589,7 @@ bool publishTemp() {
     Serial.println(temperature);
   #endif
 
-  itoa((int)floorf(temperature), m1, 10);
-  strcat(m1, ".");
-  itoa((((int)(temperature * 100)) % 100), m2, 10);
-  len = strlen(m2);
-  if (len < 2){
-    strcat(m1, "0");
-    if (len == 0){
-      strcat(m1, "0");      
-    }
-  }
-  strcat(m1, m2);
-
+  snprintf(m1, sizeof(m1), "%.2f", temperature);
   return mqttClient.publish(PUB_WATER_TEMP, m1);
 }
 
