@@ -1,11 +1,12 @@
 /*
-* custom definitions that 
-* can be put 
-* into .env.h 
+* custom definitions that
+* can be put
+* into .env.h
 */
 
 #define MQTT_SERVER_IP 192, 168, 0, 20
 #define MQTT_PORT 1883
+#define MQTT_DIS #for debugging with Serial monitor
 #define SELF_IP 192, 168, 0, 40
 #define MAC_4_LAST 0xbe, 0xef, 0x13, 0x40
 #define ETH_CS_PIN 10

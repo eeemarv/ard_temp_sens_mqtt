@@ -31,7 +31,7 @@
 
 #define MQTT_CONNECT_RETRY_TIME 5000
 
-#define ONE_WIRE_PRE_RESET_STABILIZE_TIME 10
+#define ONE_WIRE_PRE_RESET_STABILIZE_TIME 100
 #define ONE_WIRE_RESET_PULSE_TIME 490
 #define ONE_WIRE_RESET_RELEASE_TIME 240
 #define ONE_WIRE_WRITE_INIT_TIME 10
@@ -119,7 +119,7 @@ typedef uint8_t DsScratchPad[DS_SCRATCHPAD_SIZE];
 #endif
 
 // See https://stackoverflow.com/a/63468969
-template< unsigned N > 
+template< unsigned N >
 inline static void nops(){
   asm ("nop");
   nops< N - 1 >();
@@ -174,7 +174,7 @@ static const uint8_t PROGMEM dscrc2x16_table[] = {
 
 inline uint8_t oneWireCrc8(uint8_t crc){
   return pgm_read_byte(dscrc2x16_table + (crc & 0x0f)) ^
-    pgm_read_byte(dscrc2x16_table + 16 + ((crc >> 4) & 0x0f));  
+    pgm_read_byte(dscrc2x16_table + 16 + ((crc >> 4) & 0x0f));
 }
 
 /**
@@ -194,20 +194,20 @@ inline bool oneWireReset(){
 	uint8_t retryCount = 200;
   uint8_t releaseTime;
 
-  ONE_WIRE_RELEASE; 
+  ONE_WIRE_RELEASE;
 
-	// ensure the bus is high 
+	// ensure the bus is high
   while (!ONE_WIRE_SAMPLE){
     delayMicroseconds(20);
     retryCount--;
     if (!retryCount){
-      return 0;
+      return false;
     }
   }
-  ONE_WIRE_HIGH;  
+  ONE_WIRE_HIGH;
   ONE_WIRE_PULL;
   delayMicroseconds(ONE_WIRE_PRE_RESET_STABILIZE_TIME);
-  noInterrupts();  
+  noInterrupts();
   ONE_WIRE_LOW;
 	delayMicroseconds(ONE_WIRE_RESET_PULSE_TIME);
   ONE_WIRE_HIGH; // ds responds after 15 to 60µS for 60µs to 240µs
@@ -219,7 +219,7 @@ inline bool oneWireReset(){
   delayMicroseconds(60);
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_LOW;
-#endif 
+#endif
   if (ONE_WIRE_SAMPLE){
     delayMicroseconds(240);
     ONE_WIRE_HIGH;
@@ -233,10 +233,10 @@ inline bool oneWireReset(){
     if (ONE_WIRE_SAMPLE){
       break;
     }
-    nops<(CYCLES_MICROSEC * 1) - 4>();      
+    nops<(CYCLES_MICROSEC * 1) - 4>();
   }
   ONE_WIRE_HIGH;
-  ONE_WIRE_PULL;  
+  ONE_WIRE_PULL;
   interrupts();
   if (releaseTime){
     delayMicroseconds(releaseTime);
@@ -251,7 +251,7 @@ inline void oneWireWriteBit(bool b){
   ONE_WIRE_LOW;
   ONE_WIRE_PULL;
   if (b){
-    nops<CYCLES_MICROSEC * ONE_WIRE_WRITE_INIT_TIME>();     
+    nops<CYCLES_MICROSEC * ONE_WIRE_WRITE_INIT_TIME>();
     ONE_WIRE_HIGH;
     interrupts();
     delayMicroseconds(ONE_WIRE_WRITE_ONE_TIME + ONE_WIRE_IDLE_TIME);
@@ -260,7 +260,7 @@ inline void oneWireWriteBit(bool b){
   delayMicroseconds(ONE_WIRE_WRITE_INIT_TIME + ONE_WIRE_WRITE_ZERO_TIME);
   ONE_WIRE_HIGH;
   interrupts();
-  delayMicroseconds(ONE_WIRE_IDLE_TIME); 
+  delayMicroseconds(ONE_WIRE_IDLE_TIME);
 }
 
 inline void oneWireWriteByte(uint8_t v){
@@ -280,16 +280,16 @@ inline bool oneWireReadBit(){
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_HIGH;
 #endif
-  nops<CYCLES_MICROSEC * ONE_WIRE_READ_INIT_TIME>(); 
+  nops<CYCLES_MICROSEC * ONE_WIRE_READ_INIT_TIME>();
   ONE_WIRE_RELEASE;
   ONE_WIRE_HIGH;
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_LOW;
-#endif 
+#endif
   nops<(CYCLES_MICROSEC * ONE_WIRE_READ_SAMPLE_TIME) - 4>();
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_HIGH;
-#endif 
+#endif
   if (ONE_WIRE_SAMPLE){
     b = true;
     ONE_WIRE_PULL;
@@ -298,16 +298,16 @@ inline bool oneWireReadBit(){
     if (ONE_WIRE_SAMPLE){
       break;
     }
-    nops<(CYCLES_MICROSEC * 1) - 4>();      
+    nops<(CYCLES_MICROSEC * 1) - 4>();
   }
   ONE_WIRE_PULL;
   interrupts();
   if (releaseTime){
-    delayMicroseconds(releaseTime);      
+    delayMicroseconds(releaseTime);
   }
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_LOW;
-#endif 
+#endif
   delayMicroseconds(ONE_WIRE_IDLE_TIME);
   return b;
 }
@@ -370,7 +370,7 @@ inline bool oneWireReadDsScratchPath(){
  * Note 2: no crc8-verification performed yet.
  * See Maxim/Dallas One wire "Application Note 187"
  * @return true ROM address updated in EEPROM, dsIndex increased
- * @return false Error occured 
+ * @return false Error occured
  */
 inline bool oneWireSearchRomOneAddr(){
   uint8_t bitPos;
@@ -424,7 +424,7 @@ inline bool oneWireSearchRomOneAddr(){
 
     if (readBit != readBitComp){
       if (readBit){
-        curRomByte |= romByteMask;      
+        curRomByte |= romByteMask;
       }
       oneWireWriteBit(readBit);
       continue;
@@ -507,7 +507,7 @@ void oneWireSearchRomAllAddr(){
     #ifdef SERIAL_EN
       Serial.print("error on search ROM");
     #endif
-    stop();    
+    stop();
   }
   EEPROM.update(EEPROM_DS_DEVICE_COUNT, dsDeviceCount);
   #ifdef SERIAL_EN
@@ -555,11 +555,11 @@ void calcTemperature(){
 
   #ifdef SERIAL_EN
     Serial.print("Sort select: ");
-  #endif 
+  #endif
 
   for (jjj = 0; jjj < dsDeviceCount; jjj++){
     if (dsDeviceCount > 5){
-      dvc = dsDeviceCount / 2;  
+      dvc = dsDeviceCount / 2;
       if (jjj > (dvc + 1)){
         continue;
       }
@@ -570,9 +570,9 @@ void calcTemperature(){
     #ifdef SERIAL_EN
       Serial.print(dsSort[jjj]);
       Serial.print(" ");
-    #endif 
+    #endif
     accTemp += dsTemp[dsSort[jjj]];
-    accTempDiv++;     
+    accTempDiv++;
   }
 
   temperature = (float) ((((float) accTemp) / ((float) accTempDiv)) * DS_RAW_TO_C_MUL);
@@ -590,12 +590,12 @@ bool publishTemp() {
   #endif
 
   dtostrf(temperature, 4, 2, m1);
-  
+
   return mqttClient.publish(PUB_WATER_TEMP, m1);
 }
 
 /**
- * @brief 
+ * @brief
  * UNO pins
  * PD3 PWM out
  * PD4 one wire out (connect to A6)
@@ -613,12 +613,13 @@ void setup() {
   DIDR1 = 0x00; // disable PD7 & PD6 digital inputs
   ACSR = 0x00; // analog comparator enable, no interrupts, no capture
   delay(500);
-  ONE_WIRE_HIGH;  
+  ONE_WIRE_HIGH;
   ONE_WIRE_PULL;
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_LOW;
   TEST_TIME_PULL;
 #endif
+#ifndef MQTT_DIS
   mqttClient.setServer(mqttServerIP, 1883);
   mqttClient.setCallback(mqttCallback);
   Ethernet.init(ETH_CS_PIN);
@@ -630,6 +631,7 @@ void setup() {
       ; // wait for serial port to connect. Needed for native USB port only
     }
   #endif
+#endif
 
   delay(250);
   #ifdef WATCHDOG_EN
@@ -671,6 +673,7 @@ void setup() {
   }
   dsIndex = DS_INDEX_INIT;
 
+#ifndef MQTT_DIS
   if (Ethernet.hardwareStatus() == EthernetHardwareStatus::EthernetNoHardware) {
     #ifdef SERIAL_EN
       Serial.println("ENC28J60 not found.");
@@ -689,6 +692,7 @@ void setup() {
       Serial.println("Ethernet ok.");
     #endif
   }
+#endif
 
   dsLastRequest = millis();
 }
@@ -701,13 +705,15 @@ void loop() {
   #ifdef WATCHDOG_EN
     watchdog.reset();
   #endif
+
+  #ifndef MQTT_DIS
   Ethernet.maintain();
 
   if (mqttClient.connected()) {
     mqttConnectAttempts0 = 0;
     mqttConnectAttempts1 = 0;
     if (mqttPublishTrig) {
-      publishTemp();      
+      publishTemp();
       mqttPublishTrig = false;
     }
 
@@ -770,13 +776,14 @@ void loop() {
       }
     }
   }
+  #endif
 
   if (dsDeviceCount && (millis() - dsLastRequest > dsInterval)) {
     if (dsStatus & DS_READ){
       if (!oneWireReset()){
         #ifdef SERIAL_EN
         Serial.println("ERR oneWire reset");
-        #endif 
+        #endif
         dsErrorConnectCount++;
         DS_RESTART_CYCLE;
       }
@@ -821,7 +828,7 @@ void loop() {
 
       dsIndex++;
 
-      if (dsIndex >= dsDeviceCount){       
+      if (dsIndex >= dsDeviceCount){
         dsIndex = 0;
         if (!dsError){
           calcTemperature();
@@ -833,7 +840,7 @@ void loop() {
       DS_NEXT(DS_REQUEST, DS_INDEX_TIME);
 
     } else if (dsStatus & DS_REQUEST) {
-     
+
       #ifdef SERIAL_EN
         Serial.print("i");
         Serial.print(dsIndex);
