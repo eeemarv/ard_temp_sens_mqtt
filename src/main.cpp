@@ -589,7 +589,8 @@ bool publishTemp() {
     Serial.println(temperature);
   #endif
 
-  snprintf(m1, sizeof(m1), "%.2f", temperature);
+  dtostrf(temperature, 4, 2, m1);
+  
   return mqttClient.publish(PUB_WATER_TEMP, m1);
 }
 
