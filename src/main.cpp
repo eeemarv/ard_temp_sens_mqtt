@@ -31,28 +31,42 @@
 
 #define MQTT_CONNECT_RETRY_TIME 5000
 
-#define ONE_WIRE_PRE_RESET_STABILIZE_TIME 100
-#define ONE_WIRE_RESET_PULSE_TIME 490
-#define ONE_WIRE_RESET_RELEASE_TIME 240
-#define ONE_WIRE_WRITE_INIT_TIME 10
-#define ONE_WIRE_WRITE_ONE_TIME 60
-#define ONE_WIRE_WRITE_ZERO_TIME 60
-#define ONE_WIRE_READ_INIT_TIME 3
-#define ONE_WIRE_READ_SAMPLE_TIME 12
-#define ONE_WIRE_READ_RELEASE_TIME 45
-#define ONE_WIRE_IDLE_TIME 200
+#define OW_PRE_RESET_STABILIZE_TIME 100
+#define OW_RESET_PULSE_TIME 490
+#define OW_RESET_RELEASE_TIME 240
+#define OW_WRITE_INIT_TIME 10
+#define OW_WRITE_ONE_TIME 60
+#define OW_WRITE_ZERO_TIME 60
+#define OW_READ_INIT_TIME 3
+#define OW_READ_SAMPLE_TIME 12
+#define OW_READ_RELEASE_TIME 45
+#define OW_IDLE_TIME 200
 
-#define ONE_WIRE_BITMASK B00010000 // PD4
-#define ONE_WIRE_PORT PORTD
-#define ONE_WIRE_DDR DDRD
-#define ONE_WIRE_LOW ONE_WIRE_PORT &= ~ONE_WIRE_BITMASK;
-#define ONE_WIRE_HIGH ONE_WIRE_PORT |= ONE_WIRE_BITMASK;
-#define ONE_WIRE_RELEASE ONE_WIRE_DDR &= ~ONE_WIRE_BITMASK;
-#define ONE_WIRE_PULL ONE_WIRE_DDR |= ONE_WIRE_BITMASK;
+#define OW_PORT PORTD
+#define OW_DDR DDRD
+
+#define OW_PDU_BITMASK B00000100 // PD2
+#define OW_DRIVE_BITMASK B00010000 // PD4
+#define OW_OUTPUT_BITMASK OW_PDU_BITMASK | OW_DRIVE_BITMASK
+
+#define OW_OUTPUT_TO_HZ OW_PORT |= OW_PDU_BITMASK; OW_PORT &= ~OW_DRIVE_BITMASK;
+
+#define OW_OUTPUT_UP_TO_HZ OW_PORT |= OW_PDU_BITMASK;
+#define OW_OUTPUT_DOWN_TO_HZ OW_PORT &= ~OW_DRIVE_BITMASK;
+#define OW_OUTPUT_TO_UP OW_PORT &= (~OW_PDU_BITMASK & ~OW_DRIVE_BITMASK);
+#define OW_OUTPUT_TO_DOWN OW_PORT |= OW_PDU_BITMASK | OW_DRIVE_BITMASK;
+
+#define OW_OUTPUT_TRANS_TIME 2
+
+//#define OW_DRIVE_LOW OW_PORT &= ~OW_DRIVE_BITMASK;
+//#define OW_DRIVE_HIGH OW_PORT |= OW_DRIVE_BITMASK;
+//#define OW_DRIVE_RELEASE OW_DDR &= ~OW_DRIVE_BITMASK;
+//#define OW_DRIVE_PULL OW_DDR |= OW_DRIVE_BITMASK;
+
 #define ACO_BITMASK B00100000
-#define ONE_WIRE_SAMPLE (ACSR & ACO_BITMASK)  // comparator output
-#define ONE_WIRE_ADDRESS_BIT_SIZE 64
-#define ONE_WIRE_ADDRESS_BYTE_SIZE 8
+#define OW_SAMPLE (ACSR & ACO_BITMASK)  // comparator output
+#define OW_ADDRESS_BIT_SIZE 64
+#define OW_ADDRESS_BYTE_SIZE 8
 
 #define PREV_DISC_BIT_POS_INIT -1
 #define PREV_DISC_BIT_POS_END -1
@@ -63,10 +77,10 @@
 #define TEST_TIME_BITMASK B00100000 // PD5
 #define TEST_TIME_PORT PORTD
 #define TEST_TIME_DDR DDRD
-#define TEST_TIME_LOW ONE_WIRE_PORT &= ~TEST_TIME_BITMASK;
-#define TEST_TIME_HIGH ONE_WIRE_PORT |= TEST_TIME_BITMASK;
-#define TEST_TIME_RELEASE ONE_WIRE_DDR &= ~TEST_TIME_BITMASK;
-#define TEST_TIME_PULL ONE_WIRE_DDR |= TEST_TIME_BITMASK;
+#define TEST_TIME_LOW OW_PORT &= ~TEST_TIME_BITMASK;
+#define TEST_TIME_HIGH OW_PORT |= TEST_TIME_BITMASK;
+#define TEST_TIME_RELEASE OW_DDR &= ~TEST_TIME_BITMASK;
+#define TEST_TIME_PULL OW_DDR |= TEST_TIME_BITMASK;
 // #define TEST_TIME_PIN_ENABLE
 
 #define DS_SEARCH_ROM_COMMAND 0xf0
@@ -125,6 +139,8 @@ inline static void nops(){
   nops< N - 1 >();
 }
 template<> inline void nops<0>(){};
+
+#define OW_TRANS_TIME nops<CYCLES_MICROSEC * OW_OUTPUT_TRANS_TIME>();
 
 byte mac[] = {0xDE, 0xAD, MAC_4_LAST};
 const IPAddress selfIP(SELF_IP);
@@ -194,25 +210,40 @@ inline bool oneWireReset(){
 	uint8_t retryCount = 200;
   uint8_t releaseTime;
 
-  ONE_WIRE_RELEASE;
+  //OW_DRIVE_RELEASE;
 
 	// ensure the bus is high
-  while (!ONE_WIRE_SAMPLE){
+  while (!OW_SAMPLE){
     delayMicroseconds(20);
     retryCount--;
     if (!retryCount){
       return false;
     }
   }
-  ONE_WIRE_HIGH;
-  ONE_WIRE_PULL;
-  delayMicroseconds(ONE_WIRE_PRE_RESET_STABILIZE_TIME);
+  OW_OUTPUT_TO_UP; // n
+  // OW_DRIVE_HIGH;
+  // OW_DRIVE_PULL;
+  delayMicroseconds(OW_PRE_RESET_STABILIZE_TIME);
+
+  OW_OUTPUT_UP_TO_HZ;  // n
+  OW_TRANS_TIME;
+  // nops<CYCLES_MICROSEC * OW_OUTPUT_TRANS_TIME>();
+
   noInterrupts();
-  ONE_WIRE_LOW;
-	delayMicroseconds(ONE_WIRE_RESET_PULSE_TIME);
-  ONE_WIRE_HIGH; // ds responds after 15 to 60µS for 60µs to 240µs
+
+  // OW_DRIVE_LOW;
+  OW_OUTPUT_TO_DOWN;
+
+	delayMicroseconds(OW_RESET_PULSE_TIME);
+
+  OW_OUTPUT_DOWN_TO_HZ;
+  OW_TRANS_TIME;
+  OW_OUTPUT_TO_UP;
+
+//  OW_DRIVE_HIGH; // ds responds after 15 to 60µS for 60µs to 240µs
   nops<CYCLES_MICROSEC * 10>();
-  ONE_WIRE_RELEASE;
+  OW_OUTPUT_UP_TO_HZ;
+  //OW_DRIVE_RELEASE;
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_HIGH;
 #endif
@@ -220,47 +251,63 @@ inline bool oneWireReset(){
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_LOW;
 #endif
-  if (ONE_WIRE_SAMPLE){
+  if (OW_SAMPLE){
     delayMicroseconds(240);
-    ONE_WIRE_HIGH;
-    ONE_WIRE_PULL;
+    OW_OUTPUT_TO_UP;
+    //OW_DRIVE_HIGH;
+    //OW_DRIVE_PULL;
     interrupts();
-    delayMicroseconds(240 + ONE_WIRE_IDLE_TIME);
+    delayMicroseconds(240 + OW_IDLE_TIME);
     return false; // no ds response
   }
   delayMicroseconds(240);
-  for (releaseTime = ONE_WIRE_RESET_RELEASE_TIME; releaseTime; releaseTime--){
-    if (ONE_WIRE_SAMPLE){
+  for (releaseTime = OW_RESET_RELEASE_TIME; releaseTime; releaseTime--){
+    if (OW_SAMPLE){
       break;
     }
     nops<(CYCLES_MICROSEC * 1) - 4>();
   }
-  ONE_WIRE_HIGH;
-  ONE_WIRE_PULL;
+
+  OW_OUTPUT_TO_UP;
+
+  // OW_DRIVE_HIGH;
+  // OW_DRIVE_PULL;
   interrupts();
   if (releaseTime){
     delayMicroseconds(releaseTime);
   }
-  delayMicroseconds(ONE_WIRE_IDLE_TIME);
+  delayMicroseconds(OW_IDLE_TIME);
   return true;
 }
 
 inline void oneWireWriteBit(bool b){
   // slot 90µs + idle 20µs
   noInterrupts();
-  ONE_WIRE_LOW;
-  ONE_WIRE_PULL;
+
+  OW_OUTPUT_UP_TO_HZ;
+  OW_TRANS_TIME;
+  OW_OUTPUT_TO_DOWN;
+
+  //OW_DRIVE_LOW;
+  //OW_DRIVE_PULL;
+
   if (b){
-    nops<CYCLES_MICROSEC * ONE_WIRE_WRITE_INIT_TIME>();
-    ONE_WIRE_HIGH;
+    nops<CYCLES_MICROSEC * OW_WRITE_INIT_TIME>();
+    OW_OUTPUT_DOWN_TO_HZ;
+    OW_TRANS_TIME;
+    OW_OUTPUT_TO_UP;
+    // OW_DRIVE_HIGH;
     interrupts();
-    delayMicroseconds(ONE_WIRE_WRITE_ONE_TIME + ONE_WIRE_IDLE_TIME);
+    delayMicroseconds(OW_WRITE_ONE_TIME + OW_IDLE_TIME);
     return;
   }
-  delayMicroseconds(ONE_WIRE_WRITE_INIT_TIME + ONE_WIRE_WRITE_ZERO_TIME);
-  ONE_WIRE_HIGH;
+  delayMicroseconds(OW_WRITE_INIT_TIME + OW_WRITE_ZERO_TIME);
+  OW_OUTPUT_DOWN_TO_HZ;
+  OW_TRANS_TIME;
+  OW_OUTPUT_TO_UP;
+  //OW_DRIVE_HIGH;
   interrupts();
-  delayMicroseconds(ONE_WIRE_IDLE_TIME);
+  delayMicroseconds(OW_IDLE_TIME);
 }
 
 inline void oneWireWriteByte(uint8_t v){
@@ -275,32 +322,39 @@ inline bool oneWireReadBit(){
   uint8_t releaseTime;
 
   noInterrupts();
-  ONE_WIRE_LOW;
-  ONE_WIRE_PULL;
+  OW_OUTPUT_UP_TO_HZ;
+  OW_TRANS_TIME;
+  OW_OUTPUT_TO_DOWN;
+
+  //OW_DRIVE_LOW;
+  //OW_DRIVE_PULL;
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_HIGH;
 #endif
-  nops<CYCLES_MICROSEC * ONE_WIRE_READ_INIT_TIME>();
-  ONE_WIRE_RELEASE;
-  ONE_WIRE_HIGH;
+  nops<CYCLES_MICROSEC * OW_READ_INIT_TIME>();
+  OW_OUTPUT_DOWN_TO_HZ;
+  //OW_DRIVE_RELEASE;
+  //OW_DRIVE_HIGH;
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_LOW;
 #endif
-  nops<(CYCLES_MICROSEC * ONE_WIRE_READ_SAMPLE_TIME) - 4>();
+  nops<(CYCLES_MICROSEC * OW_READ_SAMPLE_TIME) - 4>();
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_HIGH;
 #endif
-  if (ONE_WIRE_SAMPLE){
+  if (OW_SAMPLE){
     b = true;
-    ONE_WIRE_PULL;
+    OW_OUTPUT_TO_UP;
+    // OW_DRIVE_PULL;
   }
-  for (releaseTime = ONE_WIRE_READ_RELEASE_TIME; releaseTime; releaseTime--){
-    if (ONE_WIRE_SAMPLE){
+  for (releaseTime = OW_READ_RELEASE_TIME; releaseTime; releaseTime--){
+    if (OW_SAMPLE){
       break;
     }
     nops<(CYCLES_MICROSEC * 1) - 4>();
   }
-  ONE_WIRE_PULL;
+  OW_OUTPUT_TO_UP;
+  // OW_DRIVE_PULL;
   interrupts();
   if (releaseTime){
     delayMicroseconds(releaseTime);
@@ -308,7 +362,7 @@ inline bool oneWireReadBit(){
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_LOW;
 #endif
-  delayMicroseconds(ONE_WIRE_IDLE_TIME);
+  delayMicroseconds(OW_IDLE_TIME);
   return b;
 }
 
@@ -329,11 +383,11 @@ inline uint8_t oneWireReadByte(){
  * ROM device address is read from EEPROM.
  */
 inline void oneWireRomSelect(){
-  uint8_t eepromaAdrStart = EEPROM_DS_DEVICE_ADDRESSES + (dsIndex * ONE_WIRE_ADDRESS_BYTE_SIZE);
+  uint8_t eepromaAdrStart = EEPROM_DS_DEVICE_ADDRESSES + (dsIndex * OW_ADDRESS_BYTE_SIZE);
 
   oneWireWriteByte(DS_MATCH_ROM_COMMAND);
 
-  for (uint8_t jjj = 0; jjj < ONE_WIRE_ADDRESS_BYTE_SIZE; jjj++){
+  for (uint8_t jjj = 0; jjj < OW_ADDRESS_BYTE_SIZE; jjj++){
     oneWireWriteByte(EEPROM.read(eepromaAdrStart + jjj));
   }
 }
@@ -396,7 +450,7 @@ inline bool oneWireSearchRomOneAddr(){
     Serial.print(": ");
   #endif
 
-  for (bitPos = 0; bitPos < ONE_WIRE_ADDRESS_BIT_SIZE; bitPos++){
+  for (bitPos = 0; bitPos < OW_ADDRESS_BIT_SIZE; bitPos++){
     uint8_t romByteMask = 1 << (bitPos & 0x07);
     uint8_t romByteId = bitPos >> 3;
 
@@ -405,10 +459,10 @@ inline bool oneWireSearchRomOneAddr(){
         SERIAL_PRINT_HEX(curRomByte);
         EEPROM.update(eepromCurRomByteIndex, curRomByte);
       }
-      eepromCurRomByteIndex = EEPROM_DS_DEVICE_ADDRESSES + (dsIndex * ONE_WIRE_ADDRESS_BYTE_SIZE) + romByteId;
+      eepromCurRomByteIndex = EEPROM_DS_DEVICE_ADDRESSES + (dsIndex * OW_ADDRESS_BYTE_SIZE) + romByteId;
       curRomByte = 0x00;
       if (dsIndex){
-        prevRomByte = EEPROM.read(eepromCurRomByteIndex - ONE_WIRE_ADDRESS_BYTE_SIZE);
+        prevRomByte = EEPROM.read(eepromCurRomByteIndex - OW_ADDRESS_BYTE_SIZE);
       }
     }
 
@@ -482,8 +536,8 @@ void oneWireSearchRomAllAddr(){
     if (oneWireSearchRomOneAddr()){
       // search succesful, check crc
       uint8_t crc8 = 0x00;
-      for (uint8_t jjj; jjj < ONE_WIRE_ADDRESS_BYTE_SIZE; jjj++){
-        crc8 ^= EEPROM.read(jjj + EEPROM_DS_DEVICE_ADDRESSES + (dsIndex * ONE_WIRE_ADDRESS_BYTE_SIZE));
+      for (uint8_t jjj; jjj < OW_ADDRESS_BYTE_SIZE; jjj++){
+        crc8 ^= EEPROM.read(jjj + EEPROM_DS_DEVICE_ADDRESSES + (dsIndex * OW_ADDRESS_BYTE_SIZE));
         crc8 = oneWireCrc8(crc8);
       }
       if (crc8){
@@ -604,6 +658,7 @@ bool publishTemp() {
  */
 void setup() {
   delay(250);
+  /** SETUP PWM */
   DDRD |= 1 << PWM_PD; // set to output
   analogWrite(PWM_PD, PWM_LEVEL); // pinMode output is included in this
   TCCR2B = (TCCR2B & 0xf0) | 0x01; // PWM freq 31kHz+
@@ -613,12 +668,19 @@ void setup() {
   DIDR1 = 0x00; // disable PD7 & PD6 digital inputs
   ACSR = 0x00; // analog comparator enable, no interrupts, no capture
   delay(500);
-  ONE_WIRE_HIGH;
-  ONE_WIRE_PULL;
+
+  OW_OUTPUT_TO_UP; // default state, always enter and leave functions in UP state.
+  OW_DDR |= OW_OUTPUT_BITMASK;
+
+  //OW_DRIVE_HIGH;
+  //OW_DRIVE_PULL;
+
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_LOW;
   TEST_TIME_PULL;
 #endif
+
+  /** SETUP ETHERNET CONNECTION */
 #ifndef MQTT_DIS
   mqttClient.setServer(mqttServerIP, 1883);
   mqttClient.setCallback(mqttCallback);

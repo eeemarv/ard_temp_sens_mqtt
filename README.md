@@ -4,7 +4,7 @@ Developed on [platformio](https://platformio.org/)
 Up to 8 [ds18b20](https://datasheets.maximintegrated.com/en/ds/DS18B20.pdf) temperature sensors over one onewire line (up to 300m long).
 Average of selected meridian values in Celsius from the sensors is published as mqtt message every time after all the sensors are sampled.
 
-See Maxim application note AN244 "Advanced 1-Wire Network Driver" for circuit explanation.
+See Maxim application note AN244 "Advanced 1-Wire Network Driver" for circuit explanation. The part in blue is not used.
 
 ![Driver schematic](doc/one_wire_driver_schematic.png)
 
