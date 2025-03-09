@@ -9,10 +9,24 @@
 #include <.env.h>
 #include <env_defaults.h>
 
+#define WS_T0H 1  //6 3 400 ns // cycles
+#define WS_T1H 8  //12 9 800 ns
+#define WS_T0L 6  //13 9 7 850 ns
+#define WS_T1L 1   //7 3  450 ns
+
+#define WS_BITMASK B00000001 // PC0
+#define WS_PORT PORTC
+#define WS_DDR DDRC
+#define WS_LOW WS_PORT &= ~WS_BITMASK;
+#define WS_HIGH WS_PORT |= WS_BITMASK;
+#define WS_MIN_INTERVAL 1  // milliseconds
+#define WS_PULSE_INTERVAL 20
+#define WS_MAX_INTERVAL 60111
+
 #define DS_RAW_TO_C_MUL 0.0078125f
 
 #define DS_INIT_TIME 2000
-#define DS_REQUEST_TIME 900
+#define DS_REQUEST_TIME 2000 // 900
 #define DS_READ_TIME 50
 #define DS_INDEX_TIME 50
 
@@ -22,9 +36,6 @@
 #define DS_REQUEST 0x01
 #define DS_READ 0x02
 #define DS_INDEX 0x08
-
-#define LOW_NIBBLE 0x0f
-#define HIGH_NIBBLE 0xf0
 
 #define PWM_PD PD3
 #define PWM_LEVEL 60
@@ -57,11 +68,6 @@
 #define OW_OUTPUT_TO_DOWN OW_PORT |= OW_PDU_BITMASK | OW_DRIVE_BITMASK;
 
 #define OW_OUTPUT_TRANS_TIME 2
-
-//#define OW_DRIVE_LOW OW_PORT &= ~OW_DRIVE_BITMASK;
-//#define OW_DRIVE_HIGH OW_PORT |= OW_DRIVE_BITMASK;
-//#define OW_DRIVE_RELEASE OW_DDR &= ~OW_DRIVE_BITMASK;
-//#define OW_DRIVE_PULL OW_DDR |= OW_DRIVE_BITMASK;
 
 #define ACO_BITMASK B00100000
 #define OW_SAMPLE (ACSR & ACO_BITMASK)  // comparator output
@@ -148,6 +154,22 @@ const IPAddress mqttServerIP(MQTT_SERVER_IP);
 EthernetClient ethClient;
 PubSubClient mqttClient(ethClient);
 
+uint8_t wsStatusColor = 1;
+uint32_t wsLast = 0;
+uint16_t wsInterval = 0;
+uint8_t wsRGBDef[][3] = {
+// permanent color
+  {0x00, 0x00, 0x10}, // power
+  {0x10, 0x00, 0x00}, // setup
+  {0x80, 0x00, 0x20}, // no ethernet
+  {0x80, 0x20, 0x00}, // no sensor(s)
+// pulse for 200ms
+  {0x00, 0x40, 0x00},  // read one sensor
+  {0xff, 0xff, 0xff},  // calc/send temp
+  {0x80, 0x00, 0xff},  // error sensor
+  {0xff, 0x00, 0x00},  // presence pulse
+};
+
 #ifdef WATCHDOG_EN
   Watchdog watchdog;
 #endif
@@ -203,14 +225,87 @@ void stop(){
 }
 
 /**
+ * @brief Write one byte to the WS2812 LED
+*/
+inline void wsWriteColor(uint8_t wsColor){
+  uint8_t bitMask;
+  for (bitMask = 0x80; bitMask; bitMask >>= 1){
+    WS_HIGH;
+    if (wsColor & bitMask){
+      nops<WS_T1H>();
+      WS_LOW;
+      nops<WS_T1L>();
+      continue;
+    }
+    nops<WS_T0H>();
+    WS_LOW;
+    nops<WS_T0L>();
+  }
+}
+
+/**
+ * Write a color to the LED, the order is R-G-B
+ */
+inline void wsWrite(uint8_t color){
+  noInterrupts();
+    wsWriteColor(wsRGBDef[color][0]);
+    wsWriteColor(wsRGBDef[color][1]);
+    wsWriteColor(wsRGBDef[color][2]);
+  interrupts();
+  wsLast = millis();
+}
+
+inline void wsWriteStatus(uint8_t color){
+  wsStatusColor = color;
+  wsInterval = WS_MIN_INTERVAL;
+}
+
+inline void wsWriteStatusNoLoop(uint8_t color){
+  wsWriteStatus(color);
+  wsWrite(color);
+  wsInterval = WS_MAX_INTERVAL;
+}
+
+inline void wsWritePulse(uint8_t color){
+  if (!(millis() - wsLast > WS_MIN_INTERVAL)){
+    return;
+  }
+  wsInterval = WS_PULSE_INTERVAL;
+  wsWrite(color);
+}
+
+inline void wsWriteStatusPower(){
+  wsWriteStatusNoLoop(0);
+}
+inline void wsWriteStatusSetup(){
+  wsWriteStatusNoLoop(1);
+}
+inline void wsWriteStatusNoEthernet(){
+  wsWriteStatusNoLoop(2);
+}
+inline void wsWriteStatusNoSensors(){
+  wsWriteStatusNoLoop(3);
+}
+inline void wsWritePulseReadSensor(){
+  wsWritePulse(4);
+}
+inline void wsWritePulseSendTemp(){
+  wsWritePulse(5);
+}
+inline void wsWritePulseErrorSensor(){
+  wsWritePulse(6);
+}
+inline void wsWritePulsePresence(){
+  wsWritePulse(7);
+}
+
+/**
  * @return true Devices found
  * @return false No devices found
  */
 inline bool oneWireReset(){
 	uint8_t retryCount = 200;
   uint8_t releaseTime;
-
-  //OW_DRIVE_RELEASE;
 
 	// ensure the bus is high
   while (!OW_SAMPLE){
@@ -221,17 +316,14 @@ inline bool oneWireReset(){
     }
   }
   OW_OUTPUT_TO_UP; // n
-  // OW_DRIVE_HIGH;
-  // OW_DRIVE_PULL;
+
   delayMicroseconds(OW_PRE_RESET_STABILIZE_TIME);
 
   OW_OUTPUT_UP_TO_HZ;  // n
   OW_TRANS_TIME;
-  // nops<CYCLES_MICROSEC * OW_OUTPUT_TRANS_TIME>();
 
   noInterrupts();
 
-  // OW_DRIVE_LOW;
   OW_OUTPUT_TO_DOWN;
 
 	delayMicroseconds(OW_RESET_PULSE_TIME);
@@ -240,10 +332,8 @@ inline bool oneWireReset(){
   OW_TRANS_TIME;
   OW_OUTPUT_TO_UP;
 
-//  OW_DRIVE_HIGH; // ds responds after 15 to 60µS for 60µs to 240µs
   nops<CYCLES_MICROSEC * 10>();
   OW_OUTPUT_UP_TO_HZ;
-  //OW_DRIVE_RELEASE;
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_HIGH;
 #endif
@@ -254,8 +344,6 @@ inline bool oneWireReset(){
   if (OW_SAMPLE){
     delayMicroseconds(240);
     OW_OUTPUT_TO_UP;
-    //OW_DRIVE_HIGH;
-    //OW_DRIVE_PULL;
     interrupts();
     delayMicroseconds(240 + OW_IDLE_TIME);
     return false; // no ds response
@@ -270,8 +358,6 @@ inline bool oneWireReset(){
 
   OW_OUTPUT_TO_UP;
 
-  // OW_DRIVE_HIGH;
-  // OW_DRIVE_PULL;
   interrupts();
   if (releaseTime){
     delayMicroseconds(releaseTime);
@@ -288,15 +374,11 @@ inline void oneWireWriteBit(bool b){
   OW_TRANS_TIME;
   OW_OUTPUT_TO_DOWN;
 
-  //OW_DRIVE_LOW;
-  //OW_DRIVE_PULL;
-
   if (b){
     nops<CYCLES_MICROSEC * OW_WRITE_INIT_TIME>();
     OW_OUTPUT_DOWN_TO_HZ;
     OW_TRANS_TIME;
     OW_OUTPUT_TO_UP;
-    // OW_DRIVE_HIGH;
     interrupts();
     delayMicroseconds(OW_WRITE_ONE_TIME + OW_IDLE_TIME);
     return;
@@ -305,7 +387,6 @@ inline void oneWireWriteBit(bool b){
   OW_OUTPUT_DOWN_TO_HZ;
   OW_TRANS_TIME;
   OW_OUTPUT_TO_UP;
-  //OW_DRIVE_HIGH;
   interrupts();
   delayMicroseconds(OW_IDLE_TIME);
 }
@@ -326,15 +407,12 @@ inline bool oneWireReadBit(){
   OW_TRANS_TIME;
   OW_OUTPUT_TO_DOWN;
 
-  //OW_DRIVE_LOW;
-  //OW_DRIVE_PULL;
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_HIGH;
 #endif
   nops<CYCLES_MICROSEC * OW_READ_INIT_TIME>();
   OW_OUTPUT_DOWN_TO_HZ;
-  //OW_DRIVE_RELEASE;
-  //OW_DRIVE_HIGH;
+
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_LOW;
 #endif
@@ -345,7 +423,6 @@ inline bool oneWireReadBit(){
   if (OW_SAMPLE){
     b = true;
     OW_OUTPUT_TO_UP;
-    // OW_DRIVE_PULL;
   }
   for (releaseTime = OW_READ_RELEASE_TIME; releaseTime; releaseTime--){
     if (OW_SAMPLE){
@@ -354,7 +431,6 @@ inline bool oneWireReadBit(){
     nops<(CYCLES_MICROSEC * 1) - 4>();
   }
   OW_OUTPUT_TO_UP;
-  // OW_DRIVE_PULL;
   interrupts();
   if (releaseTime){
     delayMicroseconds(releaseTime);
@@ -544,6 +620,8 @@ void oneWireSearchRomAllAddr(){
         #ifdef SERIAL_EN
           Serial.println("CRC error");
         #endif
+
+        wsWriteStatusNoSensors();
         stop();
       }
       #ifdef SERIAL_EN
@@ -561,6 +639,7 @@ void oneWireSearchRomAllAddr(){
     #ifdef SERIAL_EN
       Serial.print("error on search ROM");
     #endif
+    wsWriteStatusNoSensors();
     stop();
   }
   EEPROM.update(EEPROM_DS_DEVICE_COUNT, dsDeviceCount);
@@ -651,13 +730,20 @@ bool publishTemp() {
 /**
  * @brief
  * UNO pins
+ * PC0 data ws2812-LED (shows status)
+ * PD2 one wire DPU
  * PD3 PWM out
- * PD4 one wire out (connect to A6)
+ * PD4 one wire DRIVE
  * A6 (AIN0) one wire in (pos comp)
  * A7 (AIN1) PWM in (filtered with resistor and capicator)
  */
 void setup() {
-  delay(250);
+  delay(200);
+  WS_LOW;
+  WS_DDR |= WS_BITMASK; // Ws output
+  delay(10);
+  wsWriteStatusSetup();
+  delay(50);
   /** SETUP PWM */
   DDRD |= 1 << PWM_PD; // set to output
   analogWrite(PWM_PD, PWM_LEVEL); // pinMode output is included in this
@@ -672,9 +758,6 @@ void setup() {
   OW_OUTPUT_TO_UP; // default state, always enter and leave functions in UP state.
   OW_DDR |= OW_OUTPUT_BITMASK;
 
-  //OW_DRIVE_HIGH;
-  //OW_DRIVE_PULL;
-
 #ifdef TEST_TIME_PIN_ENABLE
   TEST_TIME_LOW;
   TEST_TIME_PULL;
@@ -687,13 +770,14 @@ void setup() {
   Ethernet.init(ETH_CS_PIN);
   SPI.begin();
   Ethernet.begin(mac, selfIP);
+#endif
+
   #ifdef SERIAL_EN
     Serial.begin(SERIAL_BAUD);
     while (!Serial) {
       ; // wait for serial port to connect. Needed for native USB port only
     }
   #endif
-#endif
 
   delay(250);
   #ifdef WATCHDOG_EN
@@ -740,6 +824,7 @@ void setup() {
     #ifdef SERIAL_EN
       Serial.println("ENC28J60 not found.");
     #endif
+    wsWriteStatusNoEthernet();
     while(1){
       delay(1);
     }
@@ -749,6 +834,7 @@ void setup() {
     #ifdef SERIAL_EN
       Serial.println("Ethernet not connected.");
     #endif
+    wsWriteStatusNoEthernet();
   } else {
     #ifdef SERIAL_EN
       Serial.println("Ethernet ok.");
@@ -757,6 +843,7 @@ void setup() {
 #endif
 
   dsLastRequest = millis();
+  wsWriteStatusPower();
 }
 
 void loop() {
@@ -776,6 +863,7 @@ void loop() {
     mqttConnectAttempts1 = 0;
     if (mqttPublishTrig) {
       publishTemp();
+      wsWritePulseSendTemp();
       mqttPublishTrig = false;
     }
 
@@ -785,6 +873,7 @@ void loop() {
       Serial.println(PUB_PRESENCE);
       #endif
       mqttClient.publish(PUB_PRESENCE, "1");
+      wsWritePulsePresence();
       lastPresence = millis();
     }
 
@@ -840,6 +929,11 @@ void loop() {
   }
   #endif
 
+  if (millis() - wsLast > wsInterval){
+    wsInterval = WS_MAX_INTERVAL;
+    wsWrite(wsStatusColor);
+  }
+
   if (dsDeviceCount && (millis() - dsLastRequest > dsInterval)) {
     if (dsStatus & DS_READ){
       if (!oneWireReset()){
@@ -852,11 +946,15 @@ void loop() {
 
       oneWireRomSelect();
 
-      if (!oneWireReadDsScratchPath()){
+      if (oneWireReadDsScratchPath()){
+        wsWritePulseReadSensor();
+      } else {
 
         #ifdef SERIAL_EN
         Serial.print("ERR scratchpad");
         #endif
+
+        wsWritePulseErrorSensor();
 
         dsErrorConnectCount++;
         DS_RESTART_CYCLE;
@@ -866,10 +964,12 @@ void loop() {
         | (((int16_t) dsScratchPad[DS_SCRATCHPAD_TEMP_LSB]) << 3);
 
       if (tmprtr >=  DS_MAX_RAW){
+        wsWritePulseErrorSensor();
         dsError85Count++;
         DS_RESTART_CYCLE;
       }
       if (tmprtr <= DS_MIN_RAW){
+        wsWritePulseErrorSensor();
         dsError85Count++;
         DS_RESTART_CYCLE;
       }
@@ -913,6 +1013,9 @@ void loop() {
         #ifdef SERIAL_EN
           Serial.println("ERR req reset conn");
         #endif
+
+        wsWritePulseErrorSensor();
+
         dsErrorConnectCount++;
         DS_RESTART_CYCLE;
       }
